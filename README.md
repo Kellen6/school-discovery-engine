@@ -1,45 +1,46 @@
-# School Discovery Engine Free v9
+# School Discovery Engine Free v10
 
-Cloud-safe Streamlit app for Laura's school outreach.
+A free Streamlit app for Laura's school outreach prospecting.
 
-## What v9 changes
+## What v10 changes
 
-- Does not rely on Google/DuckDuckGo scraping.
-- Uses three discovery paths:
-  1. Location search via Nominatim + OpenStreetMap Overpass.
-  2. Source/list pages: paste "best schools" or directory URLs and it extracts official school links.
-  3. Direct school URLs.
-- Adds a Debug tab to show exactly where hosted discovery is failing.
-- Scrapes discovered school websites for:
-  - contact/admissions/staff pages
-  - visible emails
-  - generic emails
-  - role signals
-  - email pattern inference
-  - fit score
-  - contact confidence
-- Exports CSV and Excel.
+The app now has three independent modes:
 
-## Run locally
+1. **Map / geolocation**: enter a city/area and radius, then use OpenStreetMap/Overpass to find schools.
+2. **School name**: enter school names and optional location; the app tries public search-source methods to find likely official websites.
+3. **School URL**: paste school websites directly; this is the most reliable mode.
 
-```bash
-cd school_discovery_engine_free_v9
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
+All modes then run the same enrichment process:
 
-## Deploy to Streamlit Community Cloud
+- scrape homepage
+- find contact/admissions/staff/support pages
+- extract visible emails
+- detect generic emails
+- detect role keywords
+- infer email patterns if possible
+- calculate fit score and contact confidence
+- export CSV / Excel
 
-Upload `app.py`, `requirements.txt`, and `README.md` to your GitHub repo, commit, then reboot your Streamlit app.
+## Streamlit Cloud deploy
 
-## Usage
+Upload all files in this folder to your GitHub repo root:
 
-Start with:
+- `app.py`
+- `requirements.txt`
+- `README.md`
 
-- Location: `Cape Town, Western Cape, South Africa`
-- Radius: `100 km`
-- Max OSM results: `150`
+Then reboot the Streamlit app.
 
-If no results appear, open the Debug tab and run connectivity tests. If Overpass is blocked or empty, paste source pages or official school URLs in the sidebar.
+## Best way to test
+
+Start with **School URL** mode using 3-5 known school websites. If that works, the scraping/enrichment layer is good.
+
+Then try **School name** mode.
+
+Then try **Map/geolocation** mode, which depends on OpenStreetMap coverage and can be inconsistent by city.
+
+## Notes
+
+- Inferred emails are not verified. The export clearly separates visible emails from inferred candidates.
+- Some school websites block scraping or hide contact details behind PDFs/images/forms.
+- For best results, paste school websites or source/list pages when map search is weak.
