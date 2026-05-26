@@ -10,8 +10,8 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-APP_VERSION = "v26"
-USER_AGENT = "ProspectDiscoveryEngine/25.0 (+https://streamlit.app; contact enrichment research)"
+APP_VERSION = "v27"
+USER_AGENT = "ProspectDiscoveryEngine/27.0 (+https://streamlit.app; dynamic prospect profiles)"
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -41,6 +41,146 @@ SECTOR_PROFILES = {
         "official_terms": ["contact", "about", "organization"],
     },
 }
+
+
+
+# ---------------- Dynamic prospect profiles ----------------
+
+META_PROFILES = {
+    "healthcare": {
+        "triggers": ["clinic", "doctor", "medical", "health", "therapy", "therapist", "physio", "physiotherapy", "dentist", "psychologist", "counsellor", "rehab"],
+        "page_paths": ["", "contact", "contact-us", "appointments", "bookings", "booking", "services", "team", "about", "locations"],
+        "roles": ["owner", "practice manager", "reception", "clinic manager", "director", "provider", "therapist", "doctor"],
+        "org_terms": ["clinic", "practice", "centre", "center", "services"],
+        "osm_amenities": ["clinic", "doctors", "hospital", "dentist", "physiotherapist"],
+        "reject_keywords": ["job", "jobs", "vacancy", "course", "courses", "training", "university course", "directory", "near me"]
+    },
+    "education": {
+        "triggers": ["school", "college", "university", "academy", "education", "tutor", "training"],
+        "page_paths": ["", "contact", "contact-us", "admissions", "enrolment", "staff", "team", "about", "programmes"],
+        "roles": ["principal", "director", "admissions", "registrar", "head", "counselor"],
+        "org_terms": ["school", "college", "academy", "institute", "centre"],
+        "osm_amenities": ["school", "college", "university"],
+        "reject_keywords": ["driving school", "testing yard", "licence", "parking", "residence", "student residence"]
+    },
+    "nonprofit": {
+        "triggers": ["ngo", "nonprofit", "non-profit", "charity", "foundation", "association", "community organization"],
+        "page_paths": ["", "contact", "contact-us", "about", "team", "programmes", "programs", "partners", "leadership"],
+        "roles": ["executive director", "director", "program manager", "partnerships", "operations", "contact"],
+        "org_terms": ["ngo", "nonprofit", "foundation", "association", "organisation", "organization"],
+        "osm_amenities": ["community_centre", "social_facility"],
+        "reject_keywords": ["job", "jobs", "vacancy", "directory", "wikipedia"]
+    },
+    "professional_service": {
+        "triggers": ["consultant", "lawyer", "attorney", "accountant", "agency", "firm", "advisor", "architect", "engineer"],
+        "page_paths": ["", "contact", "contact-us", "about", "team", "services", "people", "leadership"],
+        "roles": ["owner", "founder", "partner", "director", "manager", "reception"],
+        "org_terms": ["firm", "practice", "agency", "consultancy", "services", "company"],
+        "osm_amenities": ["office"],
+        "reject_keywords": ["job", "jobs", "course", "training", "directory"]
+    },
+    "general": {
+        "triggers": [],
+        "page_paths": ["", "contact", "contact-us", "about", "about-us", "team", "services", "locations"],
+        "roles": ["owner", "manager", "director", "reception", "contact"],
+        "org_terms": ["company", "service", "provider", "office"],
+        "osm_amenities": [],
+        "reject_keywords": ["job", "jobs", "vacancy", "course", "courses", "training", "directory", "wikipedia"]
+    }
+}
+
+ALIASES = {
+    "physical therapist": ["physiotherapist", "physio", "physical therapy", "physiotherapy", "rehabilitation", "sports physio"],
+    "physical therapists": ["physiotherapist", "physio", "physical therapy", "physiotherapy", "rehabilitation", "sports physio"],
+    "physiotherapist": ["physical therapist", "physio", "physiotherapy", "physical therapy", "rehabilitation"],
+    "physiotherapists": ["physical therapists", "physio", "physiotherapy clinic", "rehabilitation clinic"],
+    "doctor": ["medical practice", "clinic", "general practitioner", "gp"],
+    "doctors": ["medical practices", "clinics", "general practitioners", "gp"],
+    "dentist": ["dental practice", "dental clinic"],
+    "dentists": ["dental practices", "dental clinics"],
+    "psychologist": ["psychology practice", "therapy practice", "counsellor", "counselor"],
+    "lawyer": ["attorney", "law firm", "legal practice"],
+    "lawyers": ["attorneys", "law firms", "legal practices"],
+    "ngo": ["nonprofit", "non-profit", "charity", "foundation", "community organisation", "community organization"],
+}
+
+def singularize_phrase(q):
+    q = clean_name(q).lower()
+    words = q.split()
+    if not words:
+        return q
+    last = words[-1]
+    if last.endswith("ies") and len(last) > 4:
+        words[-1] = last[:-3] + "y"
+    elif last.endswith("ses") and len(last) > 4:
+        words[-1] = last[:-2]
+    elif last.endswith("s") and len(last) > 3 and not last.endswith("ss"):
+        words[-1] = last[:-1]
+    return " ".join(words)
+
+def pluralize_phrase(q):
+    q = clean_name(q).lower()
+    words = q.split()
+    if not words:
+        return q
+    last = words[-1]
+    if last.endswith("y"):
+        words[-1] = last[:-1] + "ies"
+    elif not last.endswith("s"):
+        words[-1] = last + "s"
+    return " ".join(words)
+
+def detect_meta_category(query):
+    q = safe_str(query).lower()
+    best = ("general", 0)
+    for meta, cfg in META_PROFILES.items():
+        score = sum(1 for t in cfg.get("triggers", []) if t in q)
+        if score > best[1]:
+            best = (meta, score)
+    return best[0]
+
+def build_dynamic_profile(query):
+    base = clean_name(query).lower()
+    meta = detect_meta_category(base)
+    cfg = META_PROFILES[meta]
+    terms = []
+    def add(x):
+        x = clean_name(x).lower()
+        if x and x not in terms:
+            terms.append(x)
+    add(base)
+    add(singularize_phrase(base))
+    add(pluralize_phrase(base))
+    for a in ALIASES.get(base, []):
+        add(a)
+    for a in ALIASES.get(singularize_phrase(base), []):
+        add(a)
+    # Generic organization-type expansions. These are not sector-specific profiles;
+    # they turn a service/person phrase into likely searchable organizations.
+    singular = singularize_phrase(base)
+    for org in cfg.get("org_terms", [])[:5]:
+        add(f"{singular} {org}")
+    # Healthcare-specific morphology: "therapy" -> "therapist", "physio" stays useful.
+    if "therapy" in base:
+        add(base.replace("therapy", "therapist"))
+        add(base.replace("therapy", "clinic"))
+    if "therapist" in base:
+        add(base.replace("therapist", "therapy"))
+        add(base.replace("therapist", "clinic"))
+    core_tokens = [t for t in text_tokens(base) if t not in {"near", "me", "best", "top"}]
+    keep = list(dict.fromkeys(core_tokens + [t for term in terms[:5] for t in text_tokens(term)]))
+    profile = {
+        "queries": terms[:10],
+        "keep_keywords": [],  # do not over-filter dynamic searches; discovery query already narrows results
+        "reject_keywords": list(dict.fromkeys(cfg.get("reject_keywords", []) + ["best of", "top 10", "list of", "directory-only"])),
+        "page_paths": cfg.get("page_paths", META_PROFILES["general"]["page_paths"]),
+        "official_terms": list(dict.fromkeys(terms[:8] + keep + cfg.get("org_terms", [])[:4])),
+        "roles": cfg.get("roles", []),
+        "meta_category": meta,
+        "osm_amenities": cfg.get("osm_amenities", []),
+        "generated_from": query,
+    }
+    return profile
 
 BAD_DOMAINS = [
     "google.", "bing.", "duckduckgo.", "yahoo.", "facebook.com", "instagram.com", "linkedin.com",
@@ -602,7 +742,14 @@ def nominatim_search(query, sector, limit=50):
     return rows
 
 def overpass_search(lat, lon, radius_m, sector, limit):
-    keys = ['node["amenity"~"school|college|university"]', 'way["amenity"~"school|college|university"]', 'relation["amenity"~"school|college|university"]']
+    profile = SECTOR_PROFILES.get(sector, SECTOR_PROFILES["General Organizations"])
+    amenities = profile.get("osm_amenities") or (["school", "college", "university"] if sector in ["Schools", "Universities / Colleges"] else [])
+    if amenities:
+        amenity_re = "|".join([re.escape(a) for a in amenities])
+        keys = [f'node["amenity"~"{amenity_re}"]', f'way["amenity"~"{amenity_re}"]', f'relation["amenity"~"{amenity_re}"]']
+    else:
+        # For dynamic sectors without an OSM amenity mapping, skip Overpass and rely on Nominatim text search.
+        return []
     q = f"""[out:json][timeout:25];({''.join([k + f'(around:{radius_m},{lat},{lon});' for k in keys])});out center tags {limit};"""
     endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.osm.ch/api/interpreter"]
     for ep in endpoints:
@@ -807,15 +954,27 @@ def export_bytes(df, excel=False):
 # ---------------- UI ----------------
 
 st.title("Prospect Discovery Engine")
-st.caption(f"{APP_VERSION} — stronger website coverage; optional Google Places support via Streamlit secrets")
+st.caption(f"{APP_VERSION} — optimized Schools mode plus dynamic Custom Search profiles; optional Google Places support")
 
 st.markdown("## Search criteria")
-st.write("Choose what you want to find and where to search. Advanced settings are in the sidebar.")
-col_a, col_b = st.columns([1, 2])
-with col_a:
-    sector = st.selectbox("Sector", list(SECTOR_PROFILES.keys()), index=0, key="main_sector_select")
-with col_b:
-    location = st.text_input("Location", "Cape Town, Western Cape, South Africa", key="main_location_input")
+st.write("Choose what you want to find and where to search. Schools use the optimized school-specific profile. Custom search uses algorithmic profile expansion from your input.")
+search_mode = st.radio("Prospect type", ["Schools (optimized)", "Custom search"], horizontal=True, key="main_search_mode")
+if search_mode == "Schools (optimized)":
+    sector = "Schools"
+    custom_query = ""
+    st.caption("Using optimized school discovery: school-specific website resolution, false-positive filters, and school contact pages.")
+else:
+    custom_query = st.text_input("What are you looking for?", "physical therapists", key="main_custom_query")
+    sector = "Custom"
+    SECTOR_PROFILES["Custom"] = build_dynamic_profile(custom_query)
+    with st.expander("Generated search profile", expanded=False):
+        prof = SECTOR_PROFILES["Custom"]
+        st.write("**Detected category:**", prof.get("meta_category", "general"))
+        st.write("**Search terms:**", ", ".join(prof.get("queries", [])[:10]))
+        st.write("**Priority pages:**", ", ".join(prof.get("page_paths", [])[:10]))
+        st.write("**Target roles:**", ", ".join(prof.get("roles", [])[:10]))
+        st.write("**Exclude terms:**", ", ".join(prof.get("reject_keywords", [])[:10]))
+location = st.text_input("Location", "Cape Town, Western Cape, South Africa", key="main_location_input")
 col_c, col_d = st.columns(2)
 with col_c:
     radius_km = st.slider("Search radius (km)", 1, 100, 10, key="main_radius_slider")
@@ -838,7 +997,7 @@ with st.sidebar:
             st.session_state[k] = [] if k == "debug_log" else None
         st.rerun()
 
-inputs = {"sector": sector, "location": location.strip(), "radius_km": radius_km, "max_candidates": max_candidates}
+inputs = {"sector": sector, "custom_query": custom_query if sector == "Custom" else "", "profile": SECTOR_PROFILES.get(sector, {}), "location": location.strip(), "radius_km": radius_km, "max_candidates": max_candidates}
 ckey = candidate_key(inputs)
 eopts = {"search_level": search_level, "find_more_contacts": find_more_contacts, "speed": speed_label, "workers": workers}
 ekey = enrichment_key(ckey, eopts)
@@ -901,7 +1060,8 @@ if st.session_state.prospect_rows:
     c5.metric("Phones", int(df.get("best_phone", pd.Series(dtype=str)).fillna("").astype(str).str.len().gt(0).sum()) if "best_phone" in df else 0)
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
-    fname_base = f"prospect_discovery_{slugify(sector)}_{slugify(location)}_{stamp}"
+    fname_sector = custom_query if sector == "Custom" and custom_query else sector
+    fname_base = f"prospect_discovery_{slugify(fname_sector)}_{slugify(location)}_{stamp}"
     d1, d2 = st.columns(2)
     with d1:
         st.download_button("Download CSV", export_bytes(df, excel=False), file_name=f"{fname_base}.csv", mime="text/csv", use_container_width=True)
