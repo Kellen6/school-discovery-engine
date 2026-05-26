@@ -620,7 +620,7 @@ def cache_key_for_candidates():
     return hashlib.md5(json.dumps(raw,sort_keys=True).encode()).hexdigest()
 
 def cache_key_for_enrichment(cand_key):
-    raw={"cand_key":cand_key,"search_level":search_level,"find_more_contacts":find_more_contacts,"workers":workers}
+    raw={"cand_key":cand_key,"enrich_mode":mode,"use_fallback":use_fallback,"workers":workers}
     return hashlib.md5(json.dumps(raw,sort_keys=True).encode()).hexdigest()
 
 def discover_from_source_pages(txt, max_candidates):
