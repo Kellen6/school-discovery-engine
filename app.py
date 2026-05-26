@@ -10,8 +10,8 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-APP_VERSION = "v27.1"
-USER_AGENT = "ProspectDiscoveryEngine/27.1 (+https://streamlit.app; dynamic prospect profiles)"
+APP_VERSION = "v28"
+USER_AGENT = "ProspectDiscoveryEngine/28 (+https://streamlit.app; validated official-site resolver)"
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -23,7 +23,7 @@ SECTOR_PROFILES = {
         "queries": ["school", "private school", "international school", "college", "academy"],
         "keep_keywords": ["school", "college", "academy", "primary", "high", "secondary", "pre-primary", "waldorf", "montessori", "campus"],
         "reject_keywords": ["driving school", "testing yard", "licence", "license", "traffic department", "parking", "residence", "student residence", "accommodation"],
-        "page_paths": ["", "contact", "contact-us", "contacts", "admissions", "enrolment", "enroll", "staff", "about", "about-us"],
+        "page_paths": ["", "contact", "contact-us", "contacts", "admissions", "admissions/contact-us", "enrolment", "enroll", "school-office", "administration", "staff", "team", "leadership", "about", "about-us", "parents", "downloads", "newsletter"],
         "official_terms": ["school", "college", "academy", "primary", "secondary", "high", "pre-primary", "preparatory"],
     },
     "Universities / Colleges": {
@@ -201,8 +201,76 @@ BAD_DOMAINS = [
     "tripadvisor", "booking.com", "property24", "gumtree", "indeed.com", "glassdoor",
 ]
 DIRECTORY_HINTS = ["schoolguide", "saschools", "snupit", "brabys", "cybo", "businesslist", "directory", "yellowpages"]
-SA_SUFFIXES = [".co.za", ".org.za", ".ac.za", ".school.za", ".edu.za", ".com", ".org", ".net"]
+# Country-aware domain handling
+#
+# v29 avoids hardcoding a few African countries only. It now uses a two-layer
+# approach:
+#   1) COUNTRY_SUFFIX_OVERRIDES for countries with known local education patterns
+#   2) generated ccTLD patterns for any country that can be resolved to ISO-2
+#
+# This keeps Kenya/South Africa performance while making the resolver usable
+# globally. Local suffixes are used as positive evidence; generic global domains
+# (.com/.org/.net/.edu) are treated cautiously for non-US searches unless the page
+# title/text strongly matches the prospect.
+COUNTRY_SUFFIX_OVERRIDES = {
+    "south africa": [".school.za", ".ac.za", ".edu.za", ".org.za", ".co.za", ".za"],
+    "kenya": [".sc.ke", ".ac.ke", ".or.ke", ".co.ke", ".go.ke", ".ke"],
+    "nigeria": [".edu.ng", ".sch.ng", ".org.ng", ".com.ng", ".ng"],
+    "ghana": [".edu.gh", ".org.gh", ".com.gh", ".gh"],
+    "uganda": [".ac.ug", ".co.ug", ".or.ug", ".ug"],
+    "rwanda": [".ac.rw", ".co.rw", ".org.rw", ".rw"],
+    "tanzania": [".ac.tz", ".co.tz", ".or.tz", ".tz"],
+    "united kingdom": [".sch.uk", ".ac.uk", ".org.uk", ".co.uk", ".uk"],
+    "uk": [".sch.uk", ".ac.uk", ".org.uk", ".co.uk", ".uk"],
+    "australia": [".edu.au", ".org.au", ".com.au", ".au"],
+    "new zealand": [".school.nz", ".ac.nz", ".org.nz", ".co.nz", ".nz"],
+    "canada": [".ca"],
+    "united states": [".edu", ".org", ".com", ".us"],
+    "usa": [".edu", ".org", ".com", ".us"],
+}
+
+COUNTRY_ALIAS_TO_ALPHA2 = {
+    "south africa": "ZA", "kenya": "KE", "nigeria": "NG", "ghana": "GH", "uganda": "UG",
+    "rwanda": "RW", "tanzania": "TZ", "senegal": "SN", "zambia": "ZM", "mozambique": "MZ",
+    "botswana": "BW", "namibia": "NA", "zimbabwe": "ZW", "united kingdom": "GB", "uk": "GB",
+    "great britain": "GB", "england": "GB", "united states": "US", "usa": "US", "us": "US",
+    "canada": "CA", "australia": "AU", "new zealand": "NZ",
+}
+
+GLOBAL_SUFFIXES = [".org", ".com", ".edu", ".net"]
 DEFAULT_SUFFIXES = [".org", ".com", ".edu", ".net"]
+
+def country_alpha2(country):
+    c = safe_str(country).lower()
+    if not c:
+        return ""
+    if c in COUNTRY_ALIAS_TO_ALPHA2:
+        return COUNTRY_ALIAS_TO_ALPHA2[c]
+    try:
+        import pycountry
+        hit = pycountry.countries.lookup(country)
+        return hit.alpha_2.upper()
+    except Exception:
+        return ""
+
+def generated_country_suffixes(country):
+    c = safe_str(country).lower()
+    override = COUNTRY_SUFFIX_OVERRIDES.get(c, [])
+    alpha2 = country_alpha2(country)
+    if not alpha2:
+        return override[:] if override else DEFAULT_SUFFIXES[:]
+    tld = "." + alpha2.lower()
+    # Generic local-domain patterns that work across many countries. Some will not
+    # exist everywhere, so guesses are still fetched and validated before use.
+    generated = [
+        f".school{tld}", f".sch{tld}", f".edu{tld}", f".ac{tld}",
+        f".org{tld}", f".or{tld}", f".co{tld}", f".com{tld}", tld,
+    ]
+    out=[]
+    for x in override + generated:
+        if x not in out:
+            out.append(x)
+    return out
 
 # ---------------- State / utils ----------------
 
@@ -272,7 +340,11 @@ def get_domain(url):
 
 def bare_domain(url):
     d = get_domain(url)
-    for suf in [".co.za", ".org.za", ".ac.za", ".school.za", ".edu.za", ".com", ".org", ".net", ".edu"]:
+    suffixes = []
+    for vals in COUNTRY_SUFFIX_OVERRIDES.values():
+        suffixes.extend(vals)
+    suffixes += [".school.za", ".co.za", ".org.za", ".ac.za", ".edu.za", ".ac.ke", ".co.ke", ".or.ke", ".sc.ke", ".edu.ng", ".com.ng", ".org.ng", ".com", ".org", ".net", ".edu"]
+    for suf in sorted(set(suffixes), key=len, reverse=True):
         if d.endswith(suf):
             return d[:-len(suf)]
     return d.split(".")[0]
@@ -283,7 +355,7 @@ def clean_name(s):
     return s
 
 def text_tokens(s):
-    stop = {"the", "and", "for", "of", "at", "in", "on", "cape", "town", "south", "africa", "western", "campus", "branch"}
+    stop = {"the", "and", "for", "of", "at", "in", "on", "cape", "town", "south", "africa", "western", "kenya", "campus", "branch"}
     return [t for t in re.sub(r"[^a-z0-9 ]", " ", safe_str(s).lower()).split() if len(t) > 1 and t not in stop]
 def raw_tokens(s):
     """Tokens with minimal stopword removal, used for acronyms like CCT / HIC."""
@@ -336,13 +408,7 @@ def page_text_and_links(url, html):
 # ---------------- Extraction ----------------
 
 def get_country_code(country):
-    c = safe_str(country).lower()
-    mapping = {
-        "south africa": "ZA", "nigeria": "NG", "kenya": "KE", "ghana": "GH", "united kingdom": "GB", "uk": "GB",
-        "united states": "US", "usa": "US", "canada": "CA", "rwanda": "RW", "uganda": "UG", "tanzania": "TZ", "senegal": "SN",
-        "zambia": "ZM", "mozambique": "MZ", "botswana": "BW", "namibia": "NA", "zimbabwe": "ZW",
-    }
-    return mapping.get(c, None)
+    return country_alpha2(country) or None
 
 def extract_emails(text):
     if not text:
@@ -411,9 +477,19 @@ def name_variants(name):
         if len(toks_imp) >= 2:
             add(" ".join(toks_imp[:2]))
     return [v for v in variants if len(v) >= 3]
+def country_suffixes(country):
+    return generated_country_suffixes(country)
+
 def domain_guesses(name, country):
+    """Conservative official-domain guesses.
+
+    v28 intentionally avoids generic .com/.org guesses for country-specific searches.
+    That prevents false positives such as olm.com, daystar.com, palmolive.org,
+    nairobi.com, etc. Search results can still return a .com/.org domain, but
+    those must pass validation instead of being accepted as guesses.
+    """
     guesses = []
-    suffixes = SA_SUFFIXES if safe_str(country).lower() in {"south africa", "za"} else DEFAULT_SUFFIXES
+    suffixes = country_suffixes(country)
     for variant in name_variants(name)[:6]:
         toks_all = text_tokens(variant)
         toks_raw = raw_tokens(variant)
@@ -422,31 +498,32 @@ def domain_guesses(name, country):
 
         def add_base(x):
             x = re.sub(r"[^a-z0-9-]", "", safe_str(x).lower())
-            if 2 <= len(x) <= 45 and x not in base_options:
+            # Avoid very short/generic domains unless they are local institutional suffixes.
+            if 3 <= len(x) <= 45 and x not in base_options:
                 base_options.append(x)
 
-        # Full compact and hyphenated names.
         for toks in [toks_imp, toks_all, toks_raw]:
             if toks:
-                add_base("".join(toks))
-                add_base("-".join(toks))
+                # Compact full names are safer than first-token guesses.
+                if len(toks) >= 2:
+                    add_base("".join(toks))
+                    add_base("-".join(toks))
                 ac = acronym(toks)
-                if 2 <= len(ac) <= 8:
+                if 3 <= len(ac) <= 8:
                     add_base(ac)
 
-        # First-token/first-two-token school variants catch alphaschool.org.za, oudemolen.org.za, etc.
+        # Local schools sometimes use first two/three tokens or acronym + sector.
         if toks_raw:
-            add_base(toks_raw[0])
-            if "school" in toks_raw:
-                add_base(toks_raw[0] + "school")
-            if "college" in toks_raw:
-                add_base(toks_raw[0] + "college")
             if len(toks_raw) >= 2:
                 add_base("".join(toks_raw[:2]))
                 add_base("-".join(toks_raw[:2]))
             if len(toks_raw) >= 3:
                 add_base("".join(toks_raw[:3]))
                 add_base("-".join(toks_raw[:3]))
+            if "school" in toks_raw and len(toks_raw[0]) >= 4:
+                add_base(toks_raw[0] + "school")
+            if "college" in toks_raw and len(toks_raw[0]) >= 4:
+                add_base(toks_raw[0] + "college")
 
         for b in base_options:
             for suf in suffixes:
@@ -458,50 +535,131 @@ def domain_guesses(name, country):
         if d and d not in seen:
             seen.add(d); out.append(g)
     return out[:80]
+
 def is_bad_result_url(url):
     d = get_domain(url)
     if not d: return True
     return any(b in d for b in BAD_DOMAINS)
 
-def score_website_candidate(url, prospect_name, location_hint="", title="", snippet="", page_text=""):
+def local_domain_score(url, country):
+    d = get_domain(url)
+    if not d:
+        return 0
+    suffixes = country_suffixes(country)
+    for suf in suffixes:
+        if d.endswith(suf):
+            # More specific local education/institution domains get stronger signal.
+            if any(x in suf for x in ["school", "sch", "edu", "ac"]):
+                return 22
+            return 16
+    # Country-specific searches should be skeptical of global generic domains,
+    # except for the US where .edu/.org/.com are normal. This is a penalty, not
+    # an automatic rejection; strong page evidence can still override it.
+    alpha2 = country_alpha2(country)
+    if alpha2 and alpha2 not in {"US"} and any(d.endswith(x) for x in GLOBAL_SUFFIXES):
+        return -18
+    return 0
+
+def identity_evidence(prospect_name, location_hint, title="", snippet="", page_text=""):
+    hay = " ".join([safe_str(title), safe_str(snippet), safe_str(page_text)[:3500]]).lower()
+    raw = raw_tokens(prospect_name)
+    loc_toks = set(text_tokens(location_hint))
+    sector_words = {"school","primary","secondary","high","college","academy","university","campus","nursery","junior","pre","prep","preparatory"}
+    distinctive = [t for t in raw if t not in loc_toks and t not in sector_words and len(t) > 2]
+    sector = [t for t in raw if t in sector_words]
+    matched_distinctive = [t for t in distinctive if t in hay]
+    matched_raw = [t for t in raw if len(t) > 2 and t in hay]
+    phrase = " ".join(raw)
+    phrase_hit = phrase and phrase in hay
+    education_hit = any(k in hay for k in ["school", "college", "academy", "primary", "secondary", "admissions", "learners", "students", "curriculum", "principal"])
+    return {
+        "distinctive": distinctive,
+        "matched_distinctive": matched_distinctive,
+        "matched_raw": matched_raw,
+        "phrase_hit": phrase_hit,
+        "education_hit": education_hit,
+        "sector_terms": sector,
+    }
+
+def looks_like_official_site(url, prospect_name, location_hint, country, title="", snippet="", page_text=""):
+    """Strict official-site validation for v28.
+
+    Search result snippets alone can be misleading. For high confidence we require
+    evidence from title/page text or a strong local-domain match. This avoids
+    accepting generic collisions like palmolive.org or olympic.edu.
+    """
+    if is_bad_result_url(url):
+        return False
+    d = get_domain(url)
+    b = bare_domain(url).replace("-", "")
+    ev = identity_evidence(prospect_name, location_hint, title, snippet, page_text)
+    raw = raw_tokens(prospect_name)
+    compact = "".join(raw)
+    local_bonus = local_domain_score(url, country)
+
+    # Strong local exact-ish domain + some page evidence.
+    if local_bonus > 0 and compact and compact in b and (ev["education_hit"] or ev["phrase_hit"] or len(ev["matched_raw"]) >= 2):
+        return True
+    # Non-local generic domains need distinctive evidence from page text/title.
+    if local_bonus < 0 and len(ev["matched_distinctive"]) < 1 and not ev["phrase_hit"]:
+        return False
+    # If the only match is a city/location token, reject.
+    if not ev["matched_distinctive"] and not ev["phrase_hit"] and len(ev["matched_raw"]) < 2:
+        return False
+    return ev["education_hit"] or ev["phrase_hit"] or len(ev["matched_raw"]) >= 2
+
+def score_website_candidate(url, prospect_name, location_hint="", title="", snippet="", page_text="", country=""):
     d = get_domain(url)
     if not d or is_bad_result_url(url):
         return -100
     bdom = bare_domain(url).replace("-", "")
     variants = name_variants(prospect_name)
-    name_toks = set(important_tokens(prospect_name) or text_tokens(prospect_name))
-    hay = " ".join([d, safe_str(title).lower(), safe_str(snippet).lower(), safe_str(page_text).lower()[:2000]])
+    loc_tokens = set(text_tokens(location_hint))
+    raw = raw_tokens(prospect_name)
+    distinctive = [t for t in raw if t not in loc_tokens and t not in {"school","primary","secondary","high","college","academy","university","campus","nursery","junior","pre","prep","preparatory"}]
+    name_toks = set(distinctive or [t for t in raw if t not in loc_tokens] or raw)
+    hay = " ".join([d, safe_str(title).lower(), safe_str(snippet).lower(), safe_str(page_text).lower()[:3500]])
     score = 0
-    # Domain/name similarity
+
+    score += local_domain_score(url, country)
+
+    # Domain/name similarity. Do not reward a domain that is only the city/location.
     for v in variants:
-        vtoks = important_tokens(v) or text_tokens(v)
+        vtoks = raw_tokens(v)
+        vtoks_nonloc = [t for t in vtoks if t not in loc_tokens]
         compact = "".join(vtoks)
-        if compact and compact in bdom:
-            score += 35
-        if bdom and compact:
-            score += int(30 * SequenceMatcher(None, compact, bdom).ratio())
-        ac = acronym(vtoks)
-        if ac and len(ac) >= 2 and ac == bdom:
-            score += 45
-        if ac and len(ac) >= 3 and ac in bdom:
-            score += 20
-    # Token evidence in title/page/snippet
+        compact_nonloc = "".join(vtoks_nonloc)
+        if compact and len(compact) >= 6 and compact in bdom:
+            score += 28
+        if compact_nonloc and len(compact_nonloc) >= 6 and compact_nonloc in bdom:
+            score += 26
+        if bdom and compact_nonloc and len(compact_nonloc) >= 5:
+            score += int(22 * SequenceMatcher(None, compact_nonloc, bdom).ratio())
+        ac = acronym(vtoks_nonloc or vtoks)
+        if ac and len(ac) >= 3 and ac == bdom:
+            score += 28
+        elif ac and len(ac) >= 4 and ac in bdom:
+            score += 14
+
     matched = [t for t in name_toks if len(t) > 2 and t in hay]
-    score += min(40, len(matched) * 10)
+    score += min(36, len(matched) * 12)
     if name_toks and len(matched) >= max(1, min(2, len(name_toks))):
-        score += 10
-    # Official/institution words
-    if any(k in hay for k in ["school", "college", "academy", "primary", "secondary", "admissions", "learners", "students"]):
         score += 12
-    if any(k in d for k in [".co.za", ".org.za", ".ac.za", ".school.za", ".edu.za"]):
-        score += 8
+    phrase = " ".join(raw)
+    if phrase and phrase in hay:
+        score += 35
+    if any(k in hay for k in ["school", "college", "academy", "primary", "secondary", "admissions", "learners", "students", "principal"]):
+        score += 18
     if any(k in hay for k in ["official", "welcome to", "contact us", "admissions"]):
-        score += 5
-    # Directory/social penalties
+        score += 7
     if any(k in d for k in DIRECTORY_HINTS):
-        score -= 25
-    if any(k in d for k in ["gov.za", "westerncape.gov", "education.gov"]):
+        score -= 30
+    if any(k in d for k in ["gov.za", "education.gov"]):
         score -= 8
+    # Hard penalty for obvious brand/location-only collisions.
+    ev = identity_evidence(prospect_name, location_hint, title, snippet, page_text)
+    if local_domain_score(url, country) < 0 and not ev["phrase_hit"] and len(ev["matched_distinctive"]) == 0:
+        score -= 50
     return score
 
 def parse_search_results(html, source, max_results=8):
@@ -629,7 +787,7 @@ def resolve_website_for_row(row, location_hint, search_level):
         if not html:
             continue
         title, meta, text, _ = page_text_and_links(gu, html)
-        score = score_website_candidate(gu, name, loc, title, meta, text[:1500]) + 8
+        score = score_website_candidate(gu, name, loc, title, meta, text[:1500], country) + 8
         candidates.append({"url": normalize_url(gu), "score": score, "method": "domain_guess_verified", "title": title})
 
     # Search queries. Normal still searches hard enough to find obvious sites.
@@ -645,7 +803,7 @@ def resolve_website_for_row(row, location_hint, search_level):
         ]
     if search_level == "Extra thorough":
         for v in variants:
-            queries += [f'"{v}" admissions', f'{v} school website {location_hint}', f'"{v}" "+27"']
+            queries += [f'"{v}" admissions', f'{v} school website {location_hint}', f'"{v}" phone', f'"{v}" email']
     # dedupe queries
     qseen, qlist = set(), []
     for q in queries:
@@ -657,7 +815,7 @@ def resolve_website_for_row(row, location_hint, search_level):
             u = normalize_url(res.get("url"))
             if not u:
                 continue
-            score = score_website_candidate(u, name, loc, res.get("title", ""), res.get("snippet", ""), "")
+            score = score_website_candidate(u, name, loc, res.get("title", ""), res.get("snippet", ""), "", country)
             candidates.append({"url": u, "score": score, "method": f"search_{res.get('source','web')}", "title": res.get("title", "")})
 
     # Dedupe by domain, keep top score.
@@ -670,19 +828,21 @@ def resolve_website_for_row(row, location_hint, search_level):
             best_by_domain[d] = c
     ranked = sorted(best_by_domain.values(), key=lambda c: c["score"], reverse=True)
 
-    # Light validation of top search results if scores are plausible but not confirmed.
+    # Validate top candidates by opening pages. This is essential outside South Africa,
+    # where naive domain guesses can collide with unrelated brands/global domains.
     validated = []
-    for c in ranked[:3 if search_level == "Normal" else 5]:
-        if c["score"] >= 62:
-            validated.append(c); continue
-        status, html = fetch(c["url"], timeout=5 if search_level == "Normal" else 8)
+    for c in ranked[:4 if search_level == "Normal" else 7]:
+        status, html = fetch(c["url"], timeout=6 if search_level == "Normal" else 9)
         if html:
             title, meta, text, _ = page_text_and_links(c["url"], html)
             c2 = dict(c)
-            c2["score"] = max(c["score"], score_website_candidate(c["url"], name, loc, title, meta, text[:2500]) + 5)
+            c2["score"] = max(c["score"], score_website_candidate(c["url"], name, loc, title, meta, text[:3500], country) + 5)
+            c2["official_ok"] = looks_like_official_site(c["url"], name, loc, country, title, meta, text[:4000])
             c2["title"] = title or c.get("title", "")
             c2["method"] = c.get("method", "search") + "_validated"
             validated.append(c2)
+        else:
+            c2 = dict(c); c2["official_ok"] = False; validated.append(c2)
     if validated:
         # Merge validated scores back
         for vc in validated:
@@ -696,12 +856,13 @@ def resolve_website_for_row(row, location_hint, search_level):
         return "", "not_found", "", "none"
 
     top = ranked[0]
-    # Confidence thresholds intentionally more aggressive than v24.3.
-    if top["score"] >= 55:
-        return top["url"], top["method"], candidates_str, "high" if top["score"] >= 75 else "medium"
-    if top["score"] >= 38:
-        # Use as possible but mark low/medium. Better than hiding plausible websites.
-        return top["url"], "possible_website", candidates_str, "low"
+    # v28: accept only validated official sites as the primary website.
+    # Plausible but unvalidated sites are preserved in website_candidates instead of
+    # being exported as if they were official.
+    if top.get("official_ok") and top["score"] >= 55:
+        return top["url"], top["method"], candidates_str, "high" if top["score"] >= 78 else "medium"
+    if local_domain_score(top["url"], country) > 0 and top["score"] >= 70:
+        return top["url"], top["method"], candidates_str, "medium"
     return "", "not_found", candidates_str, "none"
 
 # ---------------- Discovery ----------------
@@ -913,41 +1074,74 @@ def scrape_one(row, search_level, find_more_contacts):
         r.update({"enrichment_status": "no_website"})
         return r
     profile = SECTOR_PROFILES.get(r.get("sector", "Schools"), SECTOR_PROFILES["Schools"])
-    paths = profile["page_paths"][:4 if search_level == "Normal" else len(profile["page_paths"])]
+    # v28: Normal mode still crawls enough school-relevant pages to find Kenyan/SA contacts.
+    max_paths = 9 if search_level == "Normal" else len(profile["page_paths"])
+    paths = profile["page_paths"][:max_paths]
     emails, phones, pages = [], [], []
+
+    def add_contacts_from_html(url, html):
+        title, meta, text, links = page_text_and_links(url, html)
+        # Include hrefs because many emails/phones live in mailto:/tel: links rather than visible text.
+        href_text = " ".join([h for h, _ in links])
+        combined = text + " " + href_text
+        for e in extract_emails(combined):
+            if e not in emails:
+                emails.append(e)
+        for p in extract_phones(combined, country):
+            if p not in phones:
+                phones.append(p)
+        return title, meta, text, links
+
+    homepage_links = []
     for path in paths:
         url = site if not path else urljoin(site + "/", path)
         status, html = fetch(url, timeout=8 if search_level == "Normal" else 12)
         if not html:
             continue
         pages.append(url)
-        title, meta, text, links = page_text_and_links(url, html)
-        for e in extract_emails(text):
-            if e not in emails:
-                emails.append(e)
-        for p in extract_phones(text, country):
-            if p not in phones:
-                phones.append(p)
-        if search_level == "Extra thorough" and path == "":
-            contact_links = []
-            for href, label in links:
-                lab = (label + " " + href).lower()
-                if any(k in lab for k in ["contact", "admission", "staff", "office", "reception", "enrol"]):
-                    contact_links.append(href)
-            for href in list(dict.fromkeys(contact_links))[:6]:
-                st2, h2 = fetch(href, timeout=10)
-                if not h2:
-                    continue
-                pages.append(href)
-                _, _, txt2, _ = page_text_and_links(href, h2)
-                for e in extract_emails(txt2):
-                    if e not in emails:
-                        emails.append(e)
-                for p in extract_phones(txt2, country):
-                    if p not in phones:
-                        phones.append(p)
+        title, meta, text, links = add_contacts_from_html(url, html)
+        if path == "":
+            homepage_links = links
 
-    generic = [e for e in emails if re.match(r"^(info|admin|admissions|office|reception|enrol|enrolments|contact|secretary)@", e)]
+    # Follow relevant internal contact links found on homepage in Normal and Extra thorough.
+    contact_links = []
+    for href, label in homepage_links:
+        lab = (label + " " + href).lower()
+        if get_domain(href) == get_domain(site) and any(k in lab for k in ["contact", "admission", "staff", "office", "reception", "enrol", "apply", "leadership", "team"]):
+            contact_links.append(href)
+    link_budget = 4 if search_level == "Normal" else 10
+    for href in list(dict.fromkeys(contact_links))[:link_budget]:
+        st2, h2 = fetch(href, timeout=9 if search_level == "Normal" else 12)
+        if not h2:
+            continue
+        pages.append(href)
+        add_contacts_from_html(href, h2)
+
+    # Optional search fallback for contacts only when explicitly enabled and missing data.
+    if find_more_contacts and (not emails or not phones):
+        name = safe_str(r.get("prospect_name"))
+        loc = safe_str(r.get("city")) or safe_str(r.get("country"))
+        queries = [f'"{name}" contact', f'"{name}" phone', f'"{name}" email', f'"{name}" admissions']
+        if loc:
+            queries.append(f'"{name}" "{loc}" contact')
+        seen_pages = set(pages)
+        for q in queries[:3 if search_level == "Normal" else 6]:
+            for res in web_search(q, max_results=4, timeout=7):
+                u = normalize_url(res.get("url"))
+                if not u or u in seen_pages or is_bad_result_url(u):
+                    continue
+                # Prefer official domain, but allow directories for contact fallback.
+                st3, h3 = fetch(u, timeout=7)
+                if not h3:
+                    continue
+                seen_pages.add(u); pages.append(u)
+                add_contacts_from_html(u, h3)
+                if emails and phones:
+                    break
+            if emails and phones:
+                break
+
+    generic = [e for e in emails if re.match(r"^(info|admin|admissions|admission|office|reception|enrol|enrolments|contact|secretary|registrar)@", e)]
     osm_email = safe_str(r.get("osm_email"))
     osm_phone = safe_str(r.get("osm_phone"))
     r["visible_emails"] = "; ".join(emails)

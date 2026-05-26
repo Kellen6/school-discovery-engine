@@ -1,40 +1,17 @@
-# Prospect Discovery Engine v27
+# Prospect Discovery Engine v29
 
-Streamlit app for prospect discovery and contact enrichment.
+Streamlit app for discovering prospects by sector/location, resolving official websites, and enriching phones/emails.
 
-## What's new in v27
+## v29 update
+- Country-aware domain handling for all countries, not just South Africa/Kenya.
+- Uses ISO country lookup via `pycountry` to generate local domain patterns such as `.co.xx`, `.org.xx`, `.edu.xx`, `.ac.xx`, `.school.xx`, `.sch.xx`, and country TLDs.
+- Keeps optimized Schools mode intact.
+- Global domains like `.com`/`.org` are allowed, but treated cautiously outside the US unless page/title evidence strongly matches the prospect.
 
-- Keeps **Schools (optimized)** as a first-class mode so the school-specific website/contact improvements are preserved.
-- Adds **Custom search** with algorithmic profile expansion from user input.
-- Example: entering `physical therapists` expands into related search terms such as physiotherapist, physio, physiotherapy clinic, rehabilitation clinic, and relevant contact pages such as appointments, team, services, and contact.
-- Shows the generated profile before running, so the user can see the detected category, search terms, priority pages, target roles, and exclude terms.
-- Still supports optional Google Places via Streamlit secrets.
-
-## Run locally
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Deploy on Streamlit Cloud
-
+## Deploy
 Upload these files to the root of your GitHub repo:
-
 - `app.py`
 - `requirements.txt`
 - `README.md`
 
 Then reboot the Streamlit app.
-
-## Optional Google Places
-
-In Streamlit Cloud secrets:
-
-```toml
-GOOGLE_PLACES_API_KEY = "your_key_here"
-```
-
-The app uses Google Places only when available and helpful for website/phone resolution.
