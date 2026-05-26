@@ -1,17 +1,18 @@
-# Prospect Discovery Engine v23
+# Prospect Discovery Engine v24
 
-Streamlit app for discovering and enriching school/prospect records.
+Streamlit app for discovering prospects, resolving official websites, and enriching email/phone contact details.
 
-## Deploy on Streamlit Community Cloud
-Upload these files to GitHub and set `app.py` as the main file.
+## Deploy
+Upload these files to your GitHub repo used by Streamlit Cloud:
+- app.py
+- requirements.txt
+- README.md
 
-## What changed in v23
-- Stronger website resolver before scraping.
-- Keeps likely website candidates when confidence is not high enough.
-- Better official-site scoring using school name, location, domain similarity, and exclusion of directories/social/search pages.
-- Better first-run/cached-run messaging.
+Then reboot the app.
+
+## v24 changes
+- Three progress bars stay visible in a stack.
+- Normal mode uses a faster bounded website resolver.
+- Extra thorough mode attempts more website/contact sources.
 - One Prospects table and one export area.
-- Timing diagnostics.
-
-## Notes
-Search-engine fallback is best-effort and may be rate limited by hosted environments. If a website cannot be confidently resolved, check the `website_candidates` column.
+- CSV and Excel downloads.
