@@ -1,48 +1,39 @@
-# School Discovery Engine v4
+# School Discovery Engine Free v5
 
-Free local Streamlit app for discovering schools, using listicles/directories as source pages rather than final prospects.
+This version is designed for free hosting on Streamlit Community Cloud.
 
-## What v4 does
+Important: public search engines often block automated queries from cloud servers. v5 therefore uses a more reliable workflow:
 
-1. Searches for school targets by geography and segment.
-2. Detects “best/top/list/directory” pages.
-3. Visits those source pages and extracts outbound official school website links.
-4. Scrapes official school sites.
-5. Scores fit based on curriculum, SEN/learning support, counseling, AI/innovation, ELL/ESL.
-6. Exports Airtable-ready CSV/Excel.
+1. Paste source pages such as "best schools", school directory pages, IB/Cambridge pages, or official school URLs.
+2. The app scrapes outbound links.
+3. It keeps likely official school websites.
+4. It enriches and scores those schools.
+5. Export CSV/Excel for Airtable.
 
-## Mac setup
+## Run locally
 
 ```bash
-cd ~/Downloads
-unzip school_discovery_engine_free_v4.zip
-cd school_discovery_engine_free_v4
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open the browser URL shown by Streamlit, usually:
+## Deploy on Streamlit Community Cloud
 
-```text
-http://localhost:8501
-```
+Upload these files to GitHub:
+- app.py
+- requirements.txt
+- README.md
 
-## Hosting for Laura
+Then deploy with main file: `app.py`.
 
-Simplest free/cheap option: Streamlit Community Cloud.
+## Usage
 
-Steps:
+Start with source pages, one URL per line. Examples:
+- Best international schools in Cape Town pages
+- Best private schools in Johannesburg pages
+- School directory/category pages
+- Official school websites
 
-1. Create a GitHub account if needed.
-2. Create a new GitHub repo, e.g. `school-discovery-engine`.
-3. Upload `app.py`, `requirements.txt`, and this README.
-4. Go to Streamlit Community Cloud.
-5. Connect the GitHub repo.
-6. Deploy with main file path: `app.py`.
-7. Share the generated Streamlit URL with Laura.
-
-Cost: $0 for public GitHub repo / public app. For private repo/app, pricing depends on Streamlit plan.
-
-Important: this app scrapes public websites. Use moderate search volumes and respect websites' terms and robots rules.
+The app excludes aggregator/listicle pages from final prospects but uses them as discovery sources.
