@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-APP_VERSION = "v17"
+APP_VERSION = "v18"
 
 DEBUG_LOG_BUFFER = []
 
@@ -118,7 +118,11 @@ def init_state():
         "raw_candidates": pd.DataFrame(),
         "enriched_results": pd.DataFrame(),
         "debug_log": [],
-        "last_mode": None
+        "last_mode": None,
+        "last_query_label": "",
+        "map_discovery_signature": None,
+        "map_discovery_rows": [],
+        "map_discovery_label": ""
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1192,7 +1196,7 @@ def clear_results():
 init_state()
 
 st.title("School Discovery Engine")
-st.caption(f"Free workflow build {APP_VERSION}: sector-ready discovery, website/contact scraping, country-aware phone validation, progress tracking, and export for outreach.")
+st.caption(f"Free workflow build {APP_VERSION}: sector-ready discovery, cached map candidates, website/contact scraping, country-aware phone validation, progress tracking, and export for outreach.")
 
 with st.sidebar:
     st.header("Settings")
@@ -1209,8 +1213,15 @@ with st.sidebar:
         max_enrich_rows = st.slider("Optional max rows to enrich", 10, 300, 75, help="Rows beyond this limit are retained but marked not enriched by user limit.")
     max_resolve_rows = st.slider("Max missing websites to resolve", 0, 300, 150, help="Website search is one of the slowest steps. Increase for fuller results; lower if the app becomes slow.")
     contact_search_pages = st.slider("Search fallback pages per school", 1, 8, 3, help="Only used when web search fallback is enabled.")
+    if st.session_state.get("map_discovery_rows"):
+        st.caption(f"Cached map candidates: {len(st.session_state.map_discovery_rows)}")
+        if st.session_state.get("map_discovery_label"):
+            st.caption(st.session_state.map_discovery_label)
     if st.button("Clear results"):
         clear_results()
+        st.session_state.map_discovery_signature = None
+        st.session_state.map_discovery_rows = []
+        st.session_state.map_discovery_label = ""
         st.rerun()
 
 mode = st.radio(
@@ -1255,8 +1266,29 @@ if submitted:
     with st.spinner("Running discovery..."):
         progress_bar.progress(5, text="Geocoding / finding candidates...")
         if mode.startswith("1"):
-            rows = discover_by_location(location, radius, max_results, sector_key=sector_key)
+            # Map/geolocation discovery is cached. If the map inputs are unchanged,
+            # reruns reuse the same candidate set and only redo website/contact enrichment.
+            map_signature = {
+                "sector_key": sector_key,
+                "location": clean_name(location).lower(),
+                "radius_km": int(radius),
+                "max_results": int(max_results),
+            }
+            cached_signature = st.session_state.get("map_discovery_signature")
+            cached_rows = st.session_state.get("map_discovery_rows", [])
+            if cached_signature == map_signature and cached_rows:
+                rows = [dict(r) for r in cached_rows]
+                log(f"Map discovery reused cached candidate set: {len(rows)} rows. Map inputs unchanged.")
+                status_box.info(f"Using cached map candidate set: {len(rows)} candidates. Enrichment settings can change without rerunning map discovery.")
+            else:
+                rows = discover_by_location(location, radius, max_results, sector_key=sector_key)
+                st.session_state.map_discovery_signature = map_signature
+                st.session_state.map_discovery_rows = [dict(r) for r in rows]
+                st.session_state.map_discovery_label = f"{location} | {radius} km | {selected_sector_label} | max {max_results}"
+                log(f"Map discovery refreshed because map inputs changed. Cached {len(rows)} rows.")
             if resolve_missing:
+                # Website resolution is enrichment-adjacent, so it can rerun against the cached candidate set
+                # without re-querying map/geolocation services.
                 rows = resolve_websites_for_rows(rows[:max_resolve_rows], location_hint=location, max_workers=max_workers) + rows[max_resolve_rows:]
         elif mode.startswith("2"):
             names = [clean_name(x) for x in names_text.splitlines() if clean_name(x)]
