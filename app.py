@@ -6,11 +6,13 @@ import re
 import time
 import math
 import urllib.parse
+import phonenumbers
+from phonenumbers import NumberParseException
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-APP_VERSION = "v15"
+APP_VERSION = "v16"
 
 DEBUG_LOG_BUFFER = []
 
@@ -151,60 +153,83 @@ def extract_emails(text):
     return sorted(set(cleaned))
 
 
-PHONE_RE = re.compile(r"(?:(?:\+|00)27[\s().-]*)?(?:\(?0?\d{2}\)?[\s().-]*\d{3}[\s().-]*\d{4}|\(?0?\d{3}\)?[\s().-]*\d{3}[\s().-]*\d{3,4}|\d{2}[\s().-]*\d{3}[\s().-]*\d{4})")
-BAD_PHONE_CONTEXT = ["fax", "vat", "reg", "registration", "emis", "postal", "po box", "code", "grade", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]
 
-def normalize_phone(raw):
+# Broad candidate matcher; final validation is done by phonenumbers using the row/location country.
+PHONE_CANDIDATE_RE = re.compile(r"(?:(?:\+|00)\d{1,3}[\s().-]*)?(?:\(?\d{1,5}\)?[\s().-]*)?\d{2,5}[\s().-]*\d{2,5}[\s().-]*\d{2,5}(?:[\s().-]*\d{2,5})?")
+BAD_PHONE_CONTEXT = ["fax", "vat", "reg", "registration", "emis", "postal", "po box", "code", "grade", "exam", "emis", "gps", "latitude", "longitude"]
+COUNTRY_REGION_HINTS = {
+    "south africa": "ZA", "za": "ZA", "zambia": "ZM", "zimbabwe": "ZW", "namibia": "NA", "botswana": "BW",
+    "mozambique": "MZ", "kenya": "KE", "uganda": "UG", "rwanda": "RW", "nigeria": "NG", "ghana": "GH",
+    "tanzania": "TZ", "malawi": "MW", "ethiopia": "ET", "senegal": "SN", "morocco": "MA", "egypt": "EG",
+    "united kingdom": "GB", "uk": "GB", "england": "GB", "united states": "US", "usa": "US", "canada": "CA",
+    "australia": "AU", "new zealand": "NZ", "india": "IN", "pakistan": "PK", "turkey": "TR", "france": "FR",
+}
+
+def infer_region_code(*parts):
+    text = " ".join(str(x or "") for x in parts).lower()
+    # Prefer explicit country names.
+    for k, v in COUNTRY_REGION_HINTS.items():
+        if re.search(r"\b" + re.escape(k) + r"\b", text):
+            return v
+    # Common phone country code hints.
+    code_map = {"+27":"ZA", "+260":"ZM", "+263":"ZW", "+264":"NA", "+267":"BW", "+258":"MZ", "+254":"KE", "+256":"UG", "+250":"RW", "+234":"NG", "+233":"GH"}
+    for code, region in code_map.items():
+        if code in text:
+            return region
+    return "ZA"  # default for Laura's initial South Africa workflow
+
+def normalize_phone(raw, country_hint=""):
     if not raw:
         return ""
     s = str(raw).strip()
-    # Remove common labels and normalize whitespace.
     s = re.sub(r"(?i)^(tel|telephone|phone|mobile|cell|whatsapp|fax)\s*[:.-]?\s*", "", s).strip()
-    digits = re.sub(r"\D", "", s)
-    if not digits:
-        return ""
-    # Drop obviously non-phone long/short numeric strings.
-    if len(digits) < 9 or len(digits) > 13:
-        return ""
-    # South Africa normalization.
-    if digits.startswith("0027"):
-        digits = "27" + digits[4:]
-    if digits.startswith("27") and len(digits) >= 11:
-        national = digits[2:]
-        return "+27 " + national[:2] + " " + national[2:5] + " " + national[5:]
-    if digits.startswith("0") and len(digits) in (10, 11):
-        national = digits[1:]
-        return "+27 " + national[:2] + " " + national[2:5] + " " + national[5:]
-    # Keep as-is for non-SA, lightly spaced.
-    return "+" + digits if s.strip().startswith("+") else s
+    s = s.replace("00", "+", 1) if s.startswith("00") else s
+    region = infer_region_code(country_hint, s)
+    candidates = []
+    try:
+        candidates.append(phonenumbers.parse(s, None if s.startswith("+") else region))
+    except NumberParseException:
+        # Try removing visual separators while preserving a leading plus.
+        compact = ("+" if s.startswith("+") else "") + re.sub(r"\D", "", s)
+        try:
+            candidates.append(phonenumbers.parse(compact, None if compact.startswith("+") else region))
+        except NumberParseException:
+            pass
+    for num in candidates:
+        if phonenumbers.is_possible_number(num) and phonenumbers.is_valid_number(num):
+            return phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+    return ""
 
-def extract_phones(text):
+def extract_phones(text, country_hint=""):
     if not text:
         return []
-    found = set()
-    for m in PHONE_RE.finditer(text):
+    found = []
+    seen = set()
+    for m in PHONE_CANDIDATE_RE.finditer(text):
         raw = m.group(0)
-        start = max(0, m.start()-35)
-        end = min(len(text), m.end()+35)
+        start = max(0, m.start()-45)
+        end = min(len(text), m.end()+45)
         ctx = text[start:end].lower()
         if any(b in ctx for b in BAD_PHONE_CONTEXT):
-            # Keep fax out, but do not exclude if this is the only labelled phone later.
-            if "fax" in ctx:
-                continue
-        phone = normalize_phone(raw)
-        if phone:
-            found.add(phone)
-    return sorted(found)
+            continue
+        # Reject decimal coordinates and obvious years/dates.
+        if re.search(r"\d+\.\d+", raw) or re.search(r"\b20\d{2}\b", raw):
+            continue
+        phone = normalize_phone(raw, country_hint)
+        if phone and phone not in seen:
+            seen.add(phone)
+            found.append(phone)
+    return found
 
 def generic_email_list(emails):
     generic_names = ["info", "office", "admin", "admissions", "admission", "enrolments", "enrollment", "enrolment", "contact", "reception", "registrar"]
     return sorted({e for e in emails if e.split("@")[0].lower() in generic_names})
 
-def choose_best_phone(osm_phone="", website_phones=None, search_phones=None, directory_phones=None):
+def choose_best_phone(osm_phone="", website_phones=None, search_phones=None, directory_phones=None, country_hint=""):
     website_phones = website_phones or []
     search_phones = search_phones or []
     directory_phones = directory_phones or []
-    osm = normalize_phone(osm_phone)
+    osm = normalize_phone(osm_phone, country_hint)
     if website_phones:
         return website_phones[0], "website", "high"
     if search_phones:
@@ -715,7 +740,7 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
     for url, title in dedup:
         snippet_text += "\n" + title
         emails.update(extract_emails(title))
-        for ph in extract_phones(title):
+        for ph in extract_phones(title, location_hint):
             phones.add(ph)
             if is_directory_url(url):
                 directory_phones.add(ph)
@@ -735,7 +760,7 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
             text = r.text[:12000]
         all_text += "\n" + text
         emails.update(extract_emails(r.text + "\n" + text))
-        for ph in extract_phones(r.text + "\n" + text):
+        for ph in extract_phones(r.text + "\n" + text, location_hint):
             phones.add(ph)
             if is_directory_url(url):
                 directory_phones.add(ph)
@@ -850,7 +875,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
         "search_emails": "",
         "search_generic_emails": "",
         "search_contact_sources": "",
-        "osm_phone": normalize_phone(row.get("phone", "")),
+        "osm_phone": normalize_phone(row.get("phone", ""), location_hint),
         "website_phone": "",
         "search_phone": "",
         "directory_phone": "",
@@ -895,7 +920,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
                 text = r.text
             all_text += "\n" + text
             all_emails.update(extract_emails(r.text + "\n" + text))
-            website_phones.update(extract_phones(r.text + "\n" + text))
+            website_phones.update(extract_phones(r.text + "\n" + text, location_hint))
             scraped.append(u)
     elif website and is_directory_url(website):
         result["scrape_status"] = "directory_or_social_skipped"
@@ -953,9 +978,9 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
     search_phone_list = sorted(search.get("search_phones", []) or [])
     directory_phone_list = sorted(search.get("directory_phones", []) or [])
     best_phone, phone_source, phone_confidence = choose_best_phone(
-        row.get("phone", ""), website_phone_list, search_phone_list, directory_phone_list
+        row.get("phone", ""), website_phone_list, search_phone_list, directory_phone_list, location_hint
     )
-    all_phones = sorted(set([p for p in [normalize_phone(row.get("phone", ""))] if p] + website_phone_list + search_phone_list + directory_phone_list))
+    all_phones = sorted(set([p for p in [normalize_phone(row.get("phone", ""), location_hint)] if p] + website_phone_list + search_phone_list + directory_phone_list))
 
     result.update({
         "scrape_status": "scraped" if scraped else (result.get("scrape_status") if result.get("scrape_status") != "not_attempted" else "scrape_failed"),
@@ -965,7 +990,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
         "search_emails": "; ".join(search.get("search_emails", [])),
         "search_generic_emails": "; ".join(search.get("search_generic_emails", [])),
         "search_contact_sources": "; ".join((search.get("search_source_urls") or [])[:10]),
-        "osm_phone": normalize_phone(row.get("phone", "")),
+        "osm_phone": normalize_phone(row.get("phone", ""), location_hint),
         "website_phone": "; ".join(website_phone_list),
         "search_phone": "; ".join(search_phone_list),
         "directory_phone": "; ".join(directory_phone_list),
@@ -988,25 +1013,28 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
     })
     return result
 
-def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use_contact_search=True, contact_search_pages=3, max_enrich_rows=40):
+def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use_contact_search=True, contact_search_pages=3, max_enrich_rows=None):
+    """Enrich rows. By default enriches all rows. If max_enrich_rows is set, retains skipped rows with clear status."""
+    total = len(rows)
+    limit = total if max_enrich_rows in (None, 0, "", "All") else min(int(max_enrich_rows), total)
+    rows_to_process = rows[:limit]
+    skipped_rows = rows[limit:]
     if resolve_missing:
-        rows = resolve_websites_for_rows(rows[:max_enrich_rows], location_hint=location_hint, max_workers=max_workers) + rows[max_enrich_rows:]
-    rows_to_enrich = rows[:max_enrich_rows]
-    skipped_rows = rows[max_enrich_rows:]
+        rows_to_process = resolve_websites_for_rows(rows_to_process, location_hint=location_hint, max_workers=max_workers)
     results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(scrape_school, r, location_hint, use_contact_search, contact_search_pages) for r in rows_to_enrich]
-        for fut in as_completed(futures):
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                log(f"Scrape worker failed: {type(e).__name__}: {e}")
+    if rows_to_process:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(scrape_school, r, location_hint, use_contact_search, contact_search_pages) for r in rows_to_process]
+            for fut in as_completed(futures):
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    log(f"Scrape worker failed: {type(e).__name__}: {e}")
     for r in skipped_rows:
         rr = dict(r)
-        rr.setdefault("scrape_status", "not_enriched_limit")
-        rr.setdefault("notes", "Not enriched in this run because Max rows to enrich limit was reached. Increase the setting and rerun if needed.")
+        rr.setdefault("scrape_status", "not_enriched_by_user_limit")
+        rr.setdefault("notes", "Not enriched because an optional user limit was applied. Turn on Enrich all rows or raise the limit and rerun.")
         results.append(rr)
-    # stable-ish sort by fit/contact/name
     results = sorted(results, key=lambda r: (r.get("fit_score",0), r.get("contact_confidence",0), r.get("school_name","")), reverse=True)
     return results
 
@@ -1083,7 +1111,7 @@ def clear_results():
 init_state()
 
 st.title("School Discovery Engine")
-st.caption(f"Free workflow build {APP_VERSION}: discover schools, resolve websites, scrape contacts/phones, and export for outreach.")
+st.caption(f"Free workflow build {APP_VERSION}: discover schools, resolve websites, scrape contacts/phones with country-aware validation, and export for outreach.")
 
 with st.sidebar:
     st.header("Settings")
@@ -1091,9 +1119,12 @@ with st.sidebar:
     scrape_after = st.checkbox("Scrape contacts after discovery", value=True)
     use_contact_search = st.checkbox("Use web search fallback for missing contacts", value=False, help="Slower. If website scraping finds no useful emails/contacts, search the web for contact/admissions/principal details and mark them as search-derived.")
     max_workers = st.slider("Scraping speed", 1, 6, 3, help="Lower is slower but more reliable on Streamlit Cloud.")
-    max_enrich_rows = st.slider("Max rows to enrich per run", 10, 150, 40, help="Prevents long cloud runs from appearing to hang. Raw candidates are still retained.")
-    max_resolve_rows = st.slider("Max missing websites to resolve", 0, 150, 40, help="Website search is the slowest step. Set to 0 to skip website lookup and only use websites already present in map/source data.")
-    contact_search_pages = st.slider("Search fallback pages per school", 1, 6, 2, help="Only used when web search fallback is enabled.")
+    enrich_all_rows = st.checkbox("Enrich all discovered rows", value=True, help="Recommended. Optional limits are only for very large runs where Streamlit Cloud may time out.")
+    max_enrich_rows = None
+    if not enrich_all_rows:
+        max_enrich_rows = st.slider("Optional max rows to enrich", 10, 300, 75, help="Rows beyond this limit are retained but marked not enriched by user limit.")
+    max_resolve_rows = st.slider("Max missing websites to resolve", 0, 300, 150, help="Website search is one of the slowest steps. Increase for fuller results; lower if the app becomes slow.")
+    contact_search_pages = st.slider("Search fallback pages per school", 1, 8, 3, help="Only used when web search fallback is enabled.")
     if st.button("Clear results"):
         clear_results()
         st.rerun()
@@ -1153,7 +1184,7 @@ if submitted:
                 rows = resolve_websites_for_rows(rows[:max_resolve_rows], max_workers=max_workers) + rows[max_resolve_rows:]
         raw_df = pd.DataFrame(rows)
         st.session_state.raw_candidates = raw_df
-        log(f"Raw candidates retained: {len(rows)}. Enrichment cap this run: {max_enrich_rows}.")
+        log(f"Raw candidates retained: {len(rows)}. Enrichment mode: {'all rows' if max_enrich_rows in (None, 0, '') else str(max_enrich_rows) + ' row limit'}.")
     if not rows:
         st.warning("No candidates found. Try School name or School URL mode, or paste a source/list page.")
     elif scrape_after:

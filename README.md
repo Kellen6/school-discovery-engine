@@ -1,51 +1,46 @@
-# School Discovery Engine v15
+# School Discovery Engine v16
 
-Free Streamlit app for Laura's school outreach workflow.
+Free Streamlit app for discovering schools, resolving websites, scraping contact details, and exporting outreach-ready CSV/Excel files.
 
-## What v15 does
+## v16 changes
 
-- Discover schools by:
-  1. Map / geolocation
-  2. School name
-  3. School URL
-  4. Source/list page
-- Resolve missing websites using free search/domain guesses
-- Scrape school websites for:
-  - visible emails
-  - generic emails
-  - contact/admissions/staff/support pages
-  - phone numbers from homepage, footer and contact pages
-- Optional web-search fallback for missing contact details and phones
-- Separates phone sources:
-  - `osm_phone`
-  - `website_phone`
-  - `search_phone`
-  - `directory_phone`
-  - `best_phone`
-  - `phone_source`
-  - `phone_confidence`
-  - `all_phones_found`
-- Exports raw CSV, enriched CSV and Excel workbook with unique filenames by mode/query/timestamp.
+- Defaults to **enrich all discovered rows** instead of silently capping enrichment.
+- Optional enrichment limit is still available for very large runs on Streamlit Cloud.
+- Country-aware phone validation using `phonenumbers`.
+- Phone extraction now matches the inferred country from the search/location hint, instead of assuming South Africa only.
+- Better phone columns remain: `osm_phone`, `website_phone`, `search_phone`, `directory_phone`, `best_phone`, `phone_source`, `phone_confidence`, `all_phones_found`.
+- Download filenames include mode/query/date-time so repeated exports do not overwrite each other.
 
-## Streamlit Cloud deployment
+## Run locally
 
-Replace your GitHub repo files with the contents of this folder, commit, then reboot the Streamlit app.
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-Main file: `app.py`
+## Deploy on Streamlit Community Cloud
 
-## Recommended settings for first run
+Upload these files to your GitHub repo:
 
-For Cape Town:
+- `app.py`
+- `requirements.txt`
+- `README.md`
 
-- Radius: 10–25 km
-- Max candidates: 100
-- Max missing websites to resolve: 25–40
-- Max rows to enrich per run: 25–40
-- Scraping speed: 2–3
-- Use web search fallback: OFF for first run, ON for smaller batches
+Then reboot the Streamlit app.
 
-The search fallback is slower because it searches for missing websites, emails, and phone numbers when the school site does not expose them clearly.
+## Recommended settings
 
-## Notes
+For a normal city search:
 
-Search-derived contact details are marked as unverified. Review before outreach.
+- Enrich all discovered rows: ON
+- Scraping speed: 2 or 3
+- Max missing websites to resolve: 100-150
+- Web search fallback: OFF first, ON for a second pass or smaller batches
+
+For large country/region searches:
+
+- Enrich all discovered rows: OFF
+- Optional max rows to enrich: 100-200
+- Use the raw export to preserve all discovered candidates
