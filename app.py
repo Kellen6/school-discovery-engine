@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-APP_VERSION = "v14.1"
+APP_VERSION = "v14.2"
 
 DEBUG_LOG_BUFFER = []
 
@@ -21,7 +21,7 @@ HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
-TIMEOUT = 15
+TIMEOUT = 8
 
 DIRECTORY_DOMAINS = [
     "schoolguide", "schools4sa", "saschools", "privateschool", "educationsa",
@@ -259,7 +259,7 @@ def overpass_query(lat, lon, radius_km, max_results):
     rows = []
     for ep in endpoints:
         try:
-            r = requests.post(ep, data={"data": q}, headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
+            r = requests.post(ep, data={"data": q}, headers={**HEADERS, "Content-Type": "application/x-www-form-urlencoded"}, timeout=18)
             log(f"Overpass POST {ep}: HTTP {r.status_code}")
             if r.status_code != 200:
                 log(f"Overpass body preview: {r.text[:160]}")
@@ -424,7 +424,7 @@ def ddg_search_official_site(name, location_hint=""):
     query = f"{name} {location_hint} official school website".strip()
     url = "https://html.duckduckgo.com/html/"
     try:
-        r = requests.post(url, data={"q": query}, headers=HEADERS, timeout=12)
+        r = requests.post(url, data={"q": query}, headers=HEADERS, timeout=7)
         log(f"DDG resolve '{name}': HTTP {r.status_code}")
         if r.status_code != 200:
             return ""
@@ -574,7 +574,7 @@ def parse_ddg_results(html):
 def ddg_search_results(query, max_results=8):
     url = "https://html.duckduckgo.com/html/"
     try:
-        r = requests.post(url, data={"q": query}, headers=HEADERS, timeout=14)
+        r = requests.post(url, data={"q": query}, headers=HEADERS, timeout=7)
         log(f"DDG contact search '{query[:80]}': HTTP {r.status_code}")
         if r.status_code != 200:
             return []
@@ -649,7 +649,7 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
         snippet_text += "\n" + title
         emails.update(extract_emails(title))
         snippet_sources.append(url)
-        r = safe_get(url, timeout=12)
+        r = safe_get(url, timeout=7)
         if isinstance(r, Exception) or getattr(r, "status_code", 999) >= 400:
             continue
         ctype = r.headers.get("content-type", "")
@@ -694,7 +694,7 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
         "search_confidence": min(confidence, 85),
     }
 
-def pages_to_scrape(home_url, max_pages=8):
+def pages_to_scrape(home_url, max_pages=4):
     urls = [normalize_url(home_url)]
     r = safe_get(home_url, timeout=TIMEOUT)
     if isinstance(r, Exception) or getattr(r, "status_code", 999) >= 400:
@@ -760,7 +760,7 @@ def fit_score(roles, text):
     if any(k in low for k in ["parent", "workshop", "webinar"]): score += 1
     return score
 
-def scrape_school(row, location_hint="", use_contact_search=True):
+def scrape_school(row, location_hint="", use_contact_search=True, contact_search_pages=3):
     website = normalize_url(row.get("website", ""))
     result = dict(row)
     result.update({
@@ -833,7 +833,7 @@ def scrape_school(row, location_hint="", use_contact_search=True):
             result.get("school_name", ""),
             website=website,
             location_hint=location_hint,
-            max_pages=8,
+            max_pages=contact_search_pages,
         )
         if search["search_emails"]:
             contact_source = "search_result" if not emails else "website + search_result"
@@ -882,17 +882,24 @@ def scrape_school(row, location_hint="", use_contact_search=True):
     })
     return result
 
-def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=6, use_contact_search=True):
+def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use_contact_search=True, contact_search_pages=3, max_enrich_rows=40):
     if resolve_missing:
-        rows = resolve_websites_for_rows(rows, location_hint=location_hint, max_workers=max_workers)
+        rows = resolve_websites_for_rows(rows[:max_enrich_rows], location_hint=location_hint, max_workers=max_workers) + rows[max_enrich_rows:]
+    rows_to_enrich = rows[:max_enrich_rows]
+    skipped_rows = rows[max_enrich_rows:]
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(scrape_school, r, location_hint, use_contact_search) for r in rows]
+        futures = [ex.submit(scrape_school, r, location_hint, use_contact_search, contact_search_pages) for r in rows_to_enrich]
         for fut in as_completed(futures):
             try:
                 results.append(fut.result())
             except Exception as e:
                 log(f"Scrape worker failed: {type(e).__name__}: {e}")
+    for r in skipped_rows:
+        rr = dict(r)
+        rr.setdefault("scrape_status", "not_enriched_limit")
+        rr.setdefault("notes", "Not enriched in this run because Max rows to enrich limit was reached. Increase the setting and rerun if needed.")
+        results.append(rr)
     # stable-ish sort by fit/contact/name
     results = sorted(results, key=lambda r: (r.get("fit_score",0), r.get("contact_confidence",0), r.get("school_name","")), reverse=True)
     return results
@@ -956,8 +963,11 @@ with st.sidebar:
     st.header("Settings")
     resolve_missing = st.checkbox("Try to resolve missing websites", value=True, help="Uses best-effort free search and domain guessing. Not guaranteed.")
     scrape_after = st.checkbox("Scrape contacts after discovery", value=True)
-    use_contact_search = st.checkbox("Use web search fallback for missing contacts", value=True, help="If website scraping finds no useful emails/contacts, search the web for contact/admissions/principal details and mark them as search-derived.")
-    max_workers = st.slider("Scraping speed", 1, 10, 5)
+    use_contact_search = st.checkbox("Use web search fallback for missing contacts", value=False, help="Slower. If website scraping finds no useful emails/contacts, search the web for contact/admissions/principal details and mark them as search-derived.")
+    max_workers = st.slider("Scraping speed", 1, 6, 3, help="Lower is slower but more reliable on Streamlit Cloud.")
+    max_enrich_rows = st.slider("Max rows to enrich per run", 10, 150, 40, help="Prevents long cloud runs from appearing to hang. Raw candidates are still retained.")
+    max_resolve_rows = st.slider("Max missing websites to resolve", 0, 150, 40, help="Website search is the slowest step. Set to 0 to skip website lookup and only use websites already present in map/source data.")
+    contact_search_pages = st.slider("Search fallback pages per school", 1, 6, 2, help="Only used when web search fallback is enabled.")
     if st.button("Clear results"):
         clear_results()
         st.rerun()
@@ -973,19 +983,19 @@ with st.form("discovery_form"):
         location = st.text_input("Location", value="Cape Town, Western Cape, South Africa")
         radius = st.slider("Radius (km)", 1, 100, 10)
         max_results = st.slider("Max candidates", 10, 300, 100)
-        submitted = st.form_submit_button("Find and scrape schools")
+        submitted = st.form_submit_button("Find schools")
     elif mode.startswith("2"):
         location = st.text_input("Optional location hint", value="Cape Town, South Africa")
         names_text = st.text_area("School names, one per line", height=180, placeholder="Lycée Français du Cap\nCape Town High School\n...")
         max_results = st.slider("Max candidates", 10, 300, 100)
-        submitted = st.form_submit_button("Resolve and scrape names")
+        submitted = st.form_submit_button("Resolve names")
     elif mode.startswith("3"):
         urls_text = st.text_area("School URLs, one per line", height=180, placeholder="https://example-school.org\nhttps://another-school.co.za")
         submitted = st.form_submit_button("Scrape URLs")
     else:
         source_urls_text = st.text_area("Source/list page URLs, one per line", height=180, placeholder="https://example.com/best-schools-cape-town")
         max_results = st.slider("Max extracted school links", 10, 300, 100)
-        submitted = st.form_submit_button("Extract and scrape school links")
+        submitted = st.form_submit_button("Extract school links")
 
 if submitted:
     st.session_state.debug_log = []
@@ -994,7 +1004,7 @@ if submitted:
         if mode.startswith("1"):
             rows = discover_by_location(location, radius, max_results)
             if resolve_missing:
-                rows = resolve_websites_for_rows(rows, location_hint=location, max_workers=max_workers)
+                rows = resolve_websites_for_rows(rows[:max_resolve_rows], location_hint=location, max_workers=max_workers) + rows[max_resolve_rows:]
         elif mode.startswith("2"):
             names = [clean_name(x) for x in names_text.splitlines() if clean_name(x)]
             rows = discover_by_school_names(names, location_hint=location, max_results=max_results, resolve_websites=resolve_missing)
@@ -1005,14 +1015,15 @@ if submitted:
             urls = [x.strip() for x in source_urls_text.splitlines() if x.strip()]
             rows = discover_from_source_pages(urls, max_links=max_results)
             if resolve_missing:
-                rows = resolve_websites_for_rows(rows, max_workers=max_workers)
+                rows = resolve_websites_for_rows(rows[:max_resolve_rows], max_workers=max_workers) + rows[max_resolve_rows:]
         raw_df = pd.DataFrame(rows)
         st.session_state.raw_candidates = raw_df
+        log(f"Raw candidates retained: {len(rows)}. Enrichment cap this run: {max_enrich_rows}.")
     if not rows:
         st.warning("No candidates found. Try School name or School URL mode, or paste a source/list page.")
     elif scrape_after:
         with st.spinner("Scraping websites and contacts..."):
-            enriched = enrich_rows(rows, resolve_missing=False, location_hint=(locals().get("location") or ""), max_workers=max_workers, use_contact_search=use_contact_search)
+            enriched = enrich_rows(rows, resolve_missing=False, location_hint=(locals().get("location") or ""), max_workers=max_workers, use_contact_search=use_contact_search, contact_search_pages=contact_search_pages, max_enrich_rows=max_enrich_rows)
             st.session_state.enriched_results = pd.DataFrame(enriched)
     else:
         st.session_state.enriched_results = raw_df.copy()

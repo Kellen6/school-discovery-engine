@@ -1,69 +1,24 @@
-# School Discovery Engine v14.1
+# School Discovery Engine v14.2
 
-Free Streamlit workflow for finding schools, resolving websites, scraping public contact details, and exporting outreach-ready CSV/Excel files.
+Streamlit app for school prospect discovery and contact scraping.
 
-## What v14.1 adds
+## What changed in v14.2
+- Prevents apparent hangs by adding hard caps for website resolution and enrichment.
+- Web search fallback for contacts is now OFF by default because it is slow on Streamlit Cloud.
+- Adds smaller default worker count and shorter HTTP timeouts.
+- Keeps raw candidates even when enrichment is skipped or capped.
+- Downloads preserve results.
 
-- Website scraping for school home/contact/admissions/staff/support pages
-- Web search fallback when scraping does not find useful contact details
-- Search-derived contacts are clearly labelled as unverified
-- Separate columns for:
-  - `visible_emails`
-  - `generic_emails`
-  - `search_emails`
-  - `search_generic_emails`
-  - `search_contact_sources`
-  - `contact_source`
-  - `contact_confidence`
-- Persistent results after CSV download
-- Raw candidate export + enriched export
+## Recommended Streamlit Cloud settings
+For a first run:
+- Scraping speed: 3
+- Max missing websites to resolve: 25–40
+- Max rows to enrich per run: 25–40
+- Use web search fallback for missing contacts: OFF
 
-## Discovery modes
+After confirming the app works, turn search fallback ON for a smaller batch.
 
-1. **Map / geolocation**  
-   Enter a city/metro and radius. Uses Nominatim/OSM plus fallbacks.
-
-2. **School name**  
-   Paste school names, one per line. The app attempts to resolve websites and scrape contacts.
-
-3. **School URL**  
-   Paste official school websites, one per line. Best option when you already know targets.
-
-4. **Source/list page**  
-   Paste “best schools” / directory/list URLs. The app extracts likely official school links and scrapes those.
-
-## Contact source labels
-
-- `website`: email/contact found on the school website
-- `website + search_result`: found on school website and additional web search sources
-- `search_result`: found through web search fallback
-- `website_no_email`: website scraped but no visible email found
-- `website_unreachable_or_no_contact`: website exists but could not be scraped/useful contacts were not found
-- `no_website_search_attempted`: no website available, but search fallback was attempted
-
-## Important caution
-
-Search-derived contacts are not guaranteed to be verified. Review `search_contact_sources` before outreach.
-
-## Run locally
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Deploy on Streamlit Community Cloud
-
-Upload these files to a GitHub repo:
-
+## Files
 - `app.py`
 - `requirements.txt`
 - `README.md`
-
-Then deploy with main file:
-
-```text
-app.py
-```
