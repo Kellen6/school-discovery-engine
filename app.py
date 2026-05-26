@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-APP_VERSION = "v14.2"
+APP_VERSION = "v15"
 
 DEBUG_LOG_BUFFER = []
 
@@ -149,6 +149,71 @@ def extract_emails(text):
         if not any(e.endswith(x) for x in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"]):
             cleaned.append(e)
     return sorted(set(cleaned))
+
+
+PHONE_RE = re.compile(r"(?:(?:\+|00)27[\s().-]*)?(?:\(?0?\d{2}\)?[\s().-]*\d{3}[\s().-]*\d{4}|\(?0?\d{3}\)?[\s().-]*\d{3}[\s().-]*\d{3,4}|\d{2}[\s().-]*\d{3}[\s().-]*\d{4})")
+BAD_PHONE_CONTEXT = ["fax", "vat", "reg", "registration", "emis", "postal", "po box", "code", "grade", "2020", "2021", "2022", "2023", "2024", "2025", "2026"]
+
+def normalize_phone(raw):
+    if not raw:
+        return ""
+    s = str(raw).strip()
+    # Remove common labels and normalize whitespace.
+    s = re.sub(r"(?i)^(tel|telephone|phone|mobile|cell|whatsapp|fax)\s*[:.-]?\s*", "", s).strip()
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return ""
+    # Drop obviously non-phone long/short numeric strings.
+    if len(digits) < 9 or len(digits) > 13:
+        return ""
+    # South Africa normalization.
+    if digits.startswith("0027"):
+        digits = "27" + digits[4:]
+    if digits.startswith("27") and len(digits) >= 11:
+        national = digits[2:]
+        return "+27 " + national[:2] + " " + national[2:5] + " " + national[5:]
+    if digits.startswith("0") and len(digits) in (10, 11):
+        national = digits[1:]
+        return "+27 " + national[:2] + " " + national[2:5] + " " + national[5:]
+    # Keep as-is for non-SA, lightly spaced.
+    return "+" + digits if s.strip().startswith("+") else s
+
+def extract_phones(text):
+    if not text:
+        return []
+    found = set()
+    for m in PHONE_RE.finditer(text):
+        raw = m.group(0)
+        start = max(0, m.start()-35)
+        end = min(len(text), m.end()+35)
+        ctx = text[start:end].lower()
+        if any(b in ctx for b in BAD_PHONE_CONTEXT):
+            # Keep fax out, but do not exclude if this is the only labelled phone later.
+            if "fax" in ctx:
+                continue
+        phone = normalize_phone(raw)
+        if phone:
+            found.add(phone)
+    return sorted(found)
+
+def generic_email_list(emails):
+    generic_names = ["info", "office", "admin", "admissions", "admission", "enrolments", "enrollment", "enrolment", "contact", "reception", "registrar"]
+    return sorted({e for e in emails if e.split("@")[0].lower() in generic_names})
+
+def choose_best_phone(osm_phone="", website_phones=None, search_phones=None, directory_phones=None):
+    website_phones = website_phones or []
+    search_phones = search_phones or []
+    directory_phones = directory_phones or []
+    osm = normalize_phone(osm_phone)
+    if website_phones:
+        return website_phones[0], "website", "high"
+    if search_phones:
+        return search_phones[0], "search_result", "medium-high"
+    if directory_phones:
+        return directory_phones[0], "directory", "medium"
+    if osm:
+        return osm, "osm_nominatim", "medium"
+    return "", "", ""
 
 def soup_text(soup):
     for tag in soup(["script", "style", "noscript"]):
@@ -641,6 +706,8 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
 
     all_text = ""
     emails = set()
+    phones = set()
+    directory_phones = set()
     opened_sources = []
     snippet_sources = []
     snippet_text = ""
@@ -648,6 +715,10 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
     for url, title in dedup:
         snippet_text += "\n" + title
         emails.update(extract_emails(title))
+        for ph in extract_phones(title):
+            phones.add(ph)
+            if is_directory_url(url):
+                directory_phones.add(ph)
         snippet_sources.append(url)
         r = safe_get(url, timeout=7)
         if isinstance(r, Exception) or getattr(r, "status_code", 999) >= 400:
@@ -664,14 +735,20 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
             text = r.text[:12000]
         all_text += "\n" + text
         emails.update(extract_emails(r.text + "\n" + text))
+        for ph in extract_phones(r.text + "\n" + text):
+            phones.add(ph)
+            if is_directory_url(url):
+                directory_phones.add(ph)
         opened_sources.append(url)
 
     roles = analyze_roles(all_text + "\n" + snippet_text)
     email_list = sorted(emails)
-    generic = [e for e in email_list if e.split("@")[0] in ["info", "office", "admin", "admissions", "enrolments", "enrollment", "contact", "reception", "registrar"]]
+    generic = generic_email_list(email_list)
     confidence = 0
     if email_list:
         confidence += 20
+    if phones:
+        confidence += 15
     if opened_sources:
         confidence += 15
     if domain and any(domain_from_url(u) == domain for u in opened_sources):
@@ -688,6 +765,8 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
     return {
         "search_emails": email_list,
         "search_generic_emails": generic,
+        "search_phones": sorted(phones),
+        "directory_phones": sorted(directory_phones),
         "search_source_urls": opened_sources or snippet_sources,
         "search_text": all_text + "\n" + snippet_text,
         "search_roles": roles,
@@ -771,6 +850,14 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
         "search_emails": "",
         "search_generic_emails": "",
         "search_contact_sources": "",
+        "osm_phone": normalize_phone(row.get("phone", "")),
+        "website_phone": "",
+        "search_phone": "",
+        "directory_phone": "",
+        "best_phone": "",
+        "phone_source": "",
+        "phone_confidence": "",
+        "all_phones_found": "",
         "contact_source": "none",
         "email_pattern": "",
         "contact_confidence": 0,
@@ -787,6 +874,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
 
     all_text = ""
     all_emails = set()
+    website_phones = set()
     scraped = []
     roles = {}
 
@@ -807,6 +895,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
                 text = r.text
             all_text += "\n" + text
             all_emails.update(extract_emails(r.text + "\n" + text))
+            website_phones.update(extract_phones(r.text + "\n" + text))
             scraped.append(u)
     elif website and is_directory_url(website):
         result["scrape_status"] = "directory_or_social_skipped"
@@ -815,13 +904,14 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
 
     roles = analyze_roles(all_text)
     emails = sorted(all_emails)
-    generic = [e for e in emails if e.split("@")[0] in ["info", "office", "admin", "admissions", "enrolments", "enrollment", "contact", "reception", "registrar"]]
+    generic = generic_email_list(emails)
     confidence = 0
     if emails: confidence += 30
     if generic: confidence += 20
     if roles.get("admissions"): confidence += 10
     if roles.get("principal"): confidence += 10
     if roles.get("learning_support"): confidence += 10
+    if website_phones: confidence += 15
     if scraped: confidence += 10
 
     contact_source = "website" if emails else "none"
@@ -859,6 +949,14 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
         else:
             contact_source = "no_website_search_attempted" if use_contact_search else "no_website"
 
+    website_phone_list = sorted(website_phones)
+    search_phone_list = sorted(search.get("search_phones", []) or [])
+    directory_phone_list = sorted(search.get("directory_phones", []) or [])
+    best_phone, phone_source, phone_confidence = choose_best_phone(
+        row.get("phone", ""), website_phone_list, search_phone_list, directory_phone_list
+    )
+    all_phones = sorted(set([p for p in [normalize_phone(row.get("phone", ""))] if p] + website_phone_list + search_phone_list + directory_phone_list))
+
     result.update({
         "scrape_status": "scraped" if scraped else (result.get("scrape_status") if result.get("scrape_status") != "not_attempted" else "scrape_failed"),
         "scraped_pages": len(scraped),
@@ -867,6 +965,14 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
         "search_emails": "; ".join(search.get("search_emails", [])),
         "search_generic_emails": "; ".join(search.get("search_generic_emails", [])),
         "search_contact_sources": "; ".join((search.get("search_source_urls") or [])[:10]),
+        "osm_phone": normalize_phone(row.get("phone", "")),
+        "website_phone": "; ".join(website_phone_list),
+        "search_phone": "; ".join(search_phone_list),
+        "directory_phone": "; ".join(directory_phone_list),
+        "best_phone": best_phone,
+        "phone_source": phone_source,
+        "phone_confidence": phone_confidence,
+        "all_phones_found": "; ".join(all_phones),
         "contact_source": contact_source,
         "email_pattern": infer_email_pattern(emails),
         "contact_confidence": min(confidence, 100),
@@ -904,6 +1010,26 @@ def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use
     results = sorted(results, key=lambda r: (r.get("fit_score",0), r.get("contact_confidence",0), r.get("school_name","")), reverse=True)
     return results
 
+
+def slugify_filename(text, max_len=42):
+    text = str(text or "results").lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return (text[:max_len].strip("_") or "results")
+
+def current_run_stamp():
+    # Local server timestamp; good enough for unique download names.
+    return time.strftime("%Y%m%d_%H%M")
+
+def download_basename(kind):
+    mode = st.session_state.get("last_mode", "school_discovery") or "school_discovery"
+    query = st.session_state.get("last_query_label", "") or ""
+    mode_slug = slugify_filename(mode.replace("/", " ").replace(".", ""), 24)
+    query_slug = slugify_filename(query, 32)
+    stamp = current_run_stamp()
+    if query_slug and query_slug != "results":
+        return f"school_discovery_{mode_slug}_{query_slug}_{kind}_{stamp}"
+    return f"school_discovery_{mode_slug}_{kind}_{stamp}"
+
 def to_excel_bytes(raw_df, enriched_df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -927,7 +1053,7 @@ def show_results():
             st.download_button(
                 "Download enriched CSV",
                 data=enriched_df.to_csv(index=False).encode("utf-8"),
-                file_name="school_discovery_enriched_results.csv",
+                file_name=f"{download_basename('enriched')}.csv",
                 mime="text/csv",
                 key="download_enriched_csv",
             )
@@ -935,7 +1061,7 @@ def show_results():
             st.download_button(
                 "Download raw candidates CSV",
                 data=raw_df.to_csv(index=False).encode("utf-8"),
-                file_name="candidate_schools_raw.csv",
+                file_name=f"{download_basename('raw')}.csv",
                 mime="text/csv",
                 key="download_raw_csv",
             )
@@ -943,7 +1069,7 @@ def show_results():
             st.download_button(
                 "Download Excel workbook",
                 data=to_excel_bytes(raw_df, enriched_df),
-                file_name="school_discovery_results.xlsx",
+                file_name=f"{download_basename('workbook')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_xlsx",
             )
@@ -957,7 +1083,7 @@ def clear_results():
 init_state()
 
 st.title("School Discovery Engine")
-st.caption(f"Free workflow build {APP_VERSION}: discover schools, resolve websites, scrape contacts, and export for outreach.")
+st.caption(f"Free workflow build {APP_VERSION}: discover schools, resolve websites, scrape contacts/phones, and export for outreach.")
 
 with st.sidebar:
     st.header("Settings")
@@ -998,6 +1124,15 @@ with st.form("discovery_form"):
         submitted = st.form_submit_button("Extract school links")
 
 if submitted:
+    st.session_state.last_mode = mode
+    if mode.startswith("1"):
+        st.session_state.last_query_label = locals().get("location", "map")
+    elif mode.startswith("2"):
+        st.session_state.last_query_label = locals().get("location", "school_names")
+    elif mode.startswith("3"):
+        st.session_state.last_query_label = "school_urls"
+    else:
+        st.session_state.last_query_label = "source_pages"
     st.session_state.debug_log = []
     DEBUG_LOG_BUFFER.clear()
     with st.spinner("Running discovery..."):
