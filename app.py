@@ -12,9 +12,9 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-APP_TITLE = "School Discovery Engine — Free v10"
+APP_TITLE = "School Discovery Engine — Free v11"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; SchoolDiscoveryEngine/10.0; +https://streamlit.io)",
+    "User-Agent": "Mozilla/5.0 (compatible; SchoolDiscoveryEngine/11.0; contact: school-discovery-streamlit)",
     "Accept-Language": "en-US,en;q=0.9",
 }
 TIMEOUT = 12
@@ -244,45 +244,105 @@ def geocode_location(q: str) -> Optional[Tuple[float, float, str]]:
 
 
 def overpass_schools(lat: float, lon: float, radius_km: int, max_results: int) -> Tuple[List[Dict], str]:
+    """Primary map discovery via public Overpass mirrors.
+    Streamlit Cloud sometimes cannot reach one mirror, so this tries several with short timeouts and returns full diagnostics.
+    """
     radius = int(radius_km * 1000)
     q = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:18];
     (
-      node(around:{radius},{lat},{lon})[amenity=school];
-      way(around:{radius},{lat},{lon})[amenity=school];
-      relation(around:{radius},{lat},{lon})[amenity=school];
-      node(around:{radius},{lat},{lon})[amenity=college];
-      way(around:{radius},{lat},{lon})[amenity=college];
-      node(around:{radius},{lat},{lon})[amenity=university];
-      way(around:{radius},{lat},{lon})[amenity=university];
+      nwr(around:{radius},{lat},{lon})[amenity~"^(school|college|university|kindergarten)$"];
+      nwr(around:{radius},{lat},{lon})[office~"^(educational_institution)$"];
+      nwr(around:{radius},{lat},{lon})[name~"school|college|academy|university",i];
     );
     out center tags {max_results};
     """
     endpoints = [
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.openstreetmap.ru/api/interpreter",
+        "https://overpass.osm.ch/api/interpreter",
+        "https://overpass.openstreetmap.fr/api/interpreter",
     ]
-    last = ""
+    diagnostics = []
+    seen = set()
     for ep in endpoints:
+        for method in ["post", "get"]:
+            try:
+                if method == "post":
+                    r = requests.post(ep, data={"data": q}, headers=HEADERS, timeout=22)
+                else:
+                    r = requests.get(ep, params={"data": q}, headers=HEADERS, timeout=22)
+                if r.status_code != 200:
+                    diagnostics.append(f"{ep} {method}: HTTP {r.status_code} {r.text[:120]}")
+                    continue
+                data = r.json()
+                rows = []
+                for el in data.get("elements", [])[:max_results]:
+                    tags = el.get("tags", {}) or {}
+                    name = tags.get("name") or tags.get("official_name") or ""
+                    website = tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
+                    email = tags.get("email") or tags.get("contact:email") or ""
+                    phone = tags.get("phone") or tags.get("contact:phone") or ""
+                    key = (name.lower(), normalize_url(website) or "")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if name or website:
+                        rows.append({"school_name": name, "website": normalize_url(website) or "", "osm_email": email, "osm_phone": phone, "source": f"map-overpass:{ep}"})
+                diagnostics.append(f"{ep} {method}: ok, {len(rows)} rows")
+                if rows:
+                    return rows, " | ".join(diagnostics)
+            except Exception as e:
+                diagnostics.append(f"{ep} {method}: {type(e).__name__}: {e}")
+    return [], " | ".join(diagnostics)
+
+
+def nominatim_school_search(location: str, max_results: int) -> Tuple[List[Dict], str]:
+    """Fallback map discovery that does not need Overpass. It is less complete, but works on many hosted environments.
+    It returns schools by name/address and sometimes website from extratags.
+    """
+    phrases = [
+        f"school in {location}",
+        f"international school in {location}",
+        f"private school in {location}",
+        f"college in {location}",
+        f"university in {location}",
+    ]
+    rows, seen, logs = [], set(), []
+    for phrase in phrases:
         try:
-            r = requests.post(ep, data={"data": q}, headers=HEADERS, timeout=35)
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": phrase, "format": "jsonv2", "limit": min(50, max_results), "addressdetails": 1, "extratags": 1},
+                headers=HEADERS, timeout=TIMEOUT,
+            )
+            logs.append(f"Nominatim '{phrase}': HTTP {r.status_code}")
             if r.status_code != 200:
-                last = f"{ep}: HTTP {r.status_code} {r.text[:150]}"; continue
-            data = r.json()
-            rows = []
-            for el in data.get("elements", [])[:max_results]:
-                tags = el.get("tags", {}) or {}
-                name = tags.get("name") or tags.get("official_name") or ""
-                website = tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
-                email = tags.get("email") or tags.get("contact:email") or ""
-                phone = tags.get("phone") or tags.get("contact:phone") or ""
-                if name or website:
-                    rows.append({"school_name": name, "website": normalize_url(website) or "", "osm_email": email, "osm_phone": phone, "source": "map/geolocation"})
-            return rows, f"ok: {len(rows)} rows from {ep}"
+                continue
+            for item in r.json():
+                name = item.get("name") or item.get("display_name", "").split(",")[0]
+                et = item.get("extratags", {}) or {}
+                website = et.get("website") or et.get("contact:website") or et.get("url") or ""
+                email = et.get("email") or et.get("contact:email") or ""
+                phone = et.get("phone") or et.get("contact:phone") or ""
+                kind_text = " ".join([item.get("type", ""), item.get("class", ""), name]).lower()
+                if not any(k in kind_text for k in ["school", "college", "university", "academy"]):
+                    continue
+                key = (name.lower(), normalize_url(website) or item.get("osm_id", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "school_name": name, "website": normalize_url(website) or "",
+                    "osm_email": email, "osm_phone": phone, "source": "map-nominatim-fallback",
+                    "notes": item.get("display_name", "")
+                })
+                if len(rows) >= max_results:
+                    return rows, " | ".join(logs)
+            time.sleep(0.8)
         except Exception as e:
-            last = f"{ep}: {e}"
-    return [], last
+            logs.append(f"Nominatim '{phrase}': {type(e).__name__}: {e}")
+    return rows, " | ".join(logs)
 
 
 def search_school_name(name: str, location: str = "") -> Tuple[List[str], str]:
@@ -384,7 +444,7 @@ def download_buttons(df: pd.DataFrame, base_name: str):
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Three separate workflows: map/geolocation, school name, or school URL. All can scrape websites for contact details.")
+st.caption("Three separate workflows: map/geolocation, school name, or school URL. v11 adds Overpass endpoint rotation plus Nominatim fallback.")
 
 with st.sidebar:
     st.header("Settings")
@@ -418,13 +478,20 @@ if mode.startswith("1"):
             lat, lon, display = geo
             st.info(f"Geocoded to: {display} ({lat:.4f}, {lon:.4f})")
             candidates, msg = overpass_schools(lat, lon, radius, int(max_results))
-            st.write(f"Map query: {msg}")
+            st.write(f"Overpass query: {msg}")
+            if not candidates:
+                st.info("Overpass returned no candidates or timed out. Trying Nominatim fallback...")
+                candidates, msg2 = nominatim_school_search(location, int(max_results))
+                st.write(f"Nominatim fallback: {msg2}")
             if only_with_websites:
                 candidates = [c for c in candidates if c.get("website")]
             if not candidates:
-                st.warning("No map candidates found. Try larger radius, or use School name / School URL mode.")
+                st.warning("No map candidates found. Try School name mode for known schools, or School URL mode for official sites/source pages.")
             else:
                 st.write(f"Candidates found: {len(candidates)}")
+                no_site = sum(1 for c in candidates if not c.get("website"))
+                if no_site:
+                    st.caption(f"Note: {no_site} candidates have no website in map data. They will export as leads, but contact scraping only runs when a website is available.")
                 df = enrich_candidates(candidates, do_scrape, "Scraping/enriching")
                 st.dataframe(df, use_container_width=True)
                 download_buttons(df, "school_discovery_map_results")

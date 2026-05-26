@@ -1,46 +1,23 @@
-# School Discovery Engine Free v10
+# School Discovery Engine — Free v11
 
-A free Streamlit app for Laura's school outreach prospecting.
+Three independent workflows:
 
-## What v10 changes
+1. Map / geolocation discovery using OpenStreetMap Overpass with Nominatim fallback.
+2. School-name lookup.
+3. Direct school URL or source/list page scraping.
 
-The app now has three independent modes:
+The app scrapes official school websites for visible emails, generic emails, role signals, inferred email patterns, fit score, and contact confidence.
 
-1. **Map / geolocation**: enter a city/area and radius, then use OpenStreetMap/Overpass to find schools.
-2. **School name**: enter school names and optional location; the app tries public search-source methods to find likely official websites.
-3. **School URL**: paste school websites directly; this is the most reliable mode.
+## Streamlit Cloud
+Upload `app.py`, `requirements.txt`, and this README to GitHub, then deploy `app.py` from Streamlit Community Cloud.
 
-All modes then run the same enrichment process:
-
-- scrape homepage
-- find contact/admissions/staff/support pages
-- extract visible emails
-- detect generic emails
-- detect role keywords
-- infer email patterns if possible
-- calculate fit score and contact confidence
-- export CSV / Excel
-
-## Streamlit Cloud deploy
-
-Upload all files in this folder to your GitHub repo root:
-
-- `app.py`
-- `requirements.txt`
-- `README.md`
-
-Then reboot the Streamlit app.
-
-## Best way to test
-
-Start with **School URL** mode using 3-5 known school websites. If that works, the scraping/enrichment layer is good.
-
-Then try **School name** mode.
-
-Then try **Map/geolocation** mode, which depends on OpenStreetMap coverage and can be inconsistent by city.
+## Local run
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
 
 ## Notes
-
-- Inferred emails are not verified. The export clearly separates visible emails from inferred candidates.
-- Some school websites block scraping or hide contact details behind PDFs/images/forms.
-- For best results, paste school websites or source/list pages when map search is weak.
+Map mode depends on free public OSM infrastructure. If it returns schools without websites, use School name or School URL mode to scrape contacts.
