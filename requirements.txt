@@ -1,8 +1,7 @@
-streamlit>=1.31
+streamlit>=1.32
 pandas>=2.0
 requests>=2.31
 beautifulsoup4>=4.12
 openpyxl>=3.1
 phonenumbers>=8.13
-duckduckgo-search>=5.3.1
-lxml>=4.9
+lxml>=5.0
