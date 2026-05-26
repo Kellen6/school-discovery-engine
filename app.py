@@ -1,532 +1,398 @@
-import io
-import re
-import time
-from urllib.parse import urljoin, urlparse
 
+import streamlit as st
 import pandas as pd
 import requests
-import streamlit as st
+import re
+import time
+import math
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urljoin
+from io import BytesIO
 
-APP_TITLE = "School Discovery Engine — Free v8"
-USER_AGENT = "Mozilla/5.0 (compatible; SchoolDiscoveryEngine/7.0; public school outreach research)"
-TIMEOUT = 15
-MAX_PAGES_PER_SCHOOL = 8
+st.set_page_config(page_title="School Discovery Engine v9", layout="wide")
 
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
-PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{7,}\d)")
+APP_VERSION = "v9 - cloud-safe diagnostics + multi-source discovery"
 
-SOURCE_PAGE_HINTS = [
-    "best", "top", "directory", "rank", "schools in", "list of", "finder", "catalogue", "database"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; LauraSchoolDiscovery/1.0; +https://streamlit.app)"
+}
+
+SCHOOL_KEYWORDS = [
+    "school","academy","college","university","campus","institute","lycee","lycée",
+    "gymnasium","primary","secondary","high school","preparatory","prep","international"
 ]
-BAD_DOMAINS = [
-    "facebook.com", "instagram.com", "linkedin.com", "twitter.com", "x.com", "youtube.com", "google.com",
-    "wikipedia.org", "wikidata.org", "tripadvisor", "booking.com", "news24.com", "gov.za", "gov.uk",
-    "privateschoolreview", "international-schools-database", "schoolguide", "world-schools", "whichschooladvisor"
+
+DIRECTORY_WORDS = [
+    "best","top","ranking","rankings","directory","list","lists","review","reviews",
+    "wikipedia","facebook","linkedin","instagram","youtube","twitter","x.com",
+    "schoolguide","saschools","schools4sa","international-schools-database",
+    "privateschoolreview","studyinternational","edarabia","whichschooladvisor"
 ]
-SCHOOL_DOMAIN_HINTS = ["school", "college", "academy", "campus", "education", "edu", "ac.", "sch.", "prep", "high"]
-CONTACT_PATH_HINTS = [
-    "contact", "contacts", "contact-us", "about", "staff", "team", "leadership", "management", "admissions",
-    "admission", "apply", "counselling", "counseling", "support", "learning-support", "inclusion", "sen", "senco"
-]
+
 ROLE_KEYWORDS = {
     "principal": ["principal", "head of school", "headmaster", "headmistress", "executive head"],
-    "counselor": ["counsellor", "counselor", "college counselor", "university counselor", "guidance"],
-    "learning_support": ["learning support", "sen", "senco", "special needs", "inclusion", "inclusive education", "educational support"],
-    "admissions": ["admissions", "admission", "enrolment", "enrollment", "registrar"],
-    "innovation_ai": ["innovation", "digital learning", "technology integration", "artificial intelligence", " ai ", "edtech"],
+    "admissions": ["admissions", "enrolment", "enrollment", "registrar"],
+    "counseling": ["counsellor", "counselor", "college counseling", "university guidance", "career guidance"],
+    "learning_support": ["learning support", "sen", "send", "special educational needs", "inclusive education", "inclusion"],
+    "innovation": ["innovation", "digital learning", "technology integration", "edtech", "ai"]
 }
+
 FIT_KEYWORDS = {
-    "international": ["international", "ib", "cambridge", "a level", "a-level", "igcse", "american curriculum", "british curriculum"],
-    "university_counseling": ["university counselling", "university counseling", "college counseling", "college counselling", "university guidance", "careers guidance"],
+    "international": ["international", "ib", "cambridge", "a-level", "a level", "american curriculum", "british curriculum"],
     "learning_support": ROLE_KEYWORDS["learning_support"],
-    "ai_innovation": ROLE_KEYWORDS["innovation_ai"],
-    "inclusion": ["inclusion", "inclusive", "diverse learners", "neurodiversity", "accessibility"],
-    "parent": ["parent workshop", "parent education", "parent evening", "parent seminar"],
+    "counseling": ROLE_KEYWORDS["counseling"],
+    "ai_innovation": ["artificial intelligence", " ai ", "digital learning", "innovation", "future-ready", "technology"],
+    "parent": ["parent workshop", "parent evening", "parent education", "parent webinar"]
 }
 
+CONTACT_PAGE_HINTS = [
+    "contact", "contacts", "admissions", "staff", "team", "leadership", "management",
+    "about", "people", "faculty", "directory", "support", "counselling", "counseling"
+]
 
-def norm_url(url: str) -> str:
+def safe_get(url, timeout=15):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        return {"ok": r.status_code < 400, "status": r.status_code, "url": r.url, "text": r.text[:100000], "error": ""}
+    except Exception as e:
+        return {"ok": False, "status": None, "url": url, "text": "", "error": str(e)}
+
+def normalize_url(url):
     if not url:
         return ""
     url = url.strip()
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url
+    if url.startswith("//"): url = "https:" + url
+    if not url.startswith("http"): url = "https://" + url
+    parsed=urlparse(url)
+    if not parsed.netloc: return ""
+    return parsed.scheme + "://" + parsed.netloc + parsed.path.rstrip("/")
 
-
-def domain_of(url: str) -> str:
+def domain(url):
     try:
-        return urlparse(url).netloc.lower().replace("www.", "")
+        d = urlparse(url).netloc.lower()
+        if d.startswith("www."): d=d[4:]
+        return d
     except Exception:
         return ""
 
+def looks_directory(url, title=""):
+    s=(url+" "+title).lower()
+    return any(w in s for w in DIRECTORY_WORDS)
 
-def is_bad_domain(url: str) -> bool:
-    d = domain_of(url)
-    return any(b in d for b in BAD_DOMAINS)
+def looks_school_name(name):
+    n=(name or "").lower()
+    return any(k in n for k in SCHOOL_KEYWORDS)
 
+def emails_from_text(text):
+    raw = set(re.findall(r'[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}', text or ""))
+    # filter obvious junk
+    out=[]
+    for e in raw:
+        el=e.lower().strip(".,;:)")
+        if any(bad in el for bad in ["example.com","sentry","wixpress","schema.org","domain.com"]): continue
+        out.append(el)
+    return sorted(set(out))
 
-def is_probably_school_site(url: str, anchor_text: str = "") -> bool:
-    d = domain_of(url)
-    if not d or is_bad_domain(url):
-        return False
-    hay = f"{d} {anchor_text}".lower()
-    return any(h in hay for h in SCHOOL_DOMAIN_HINTS)
+def infer_pattern(emails):
+    # Basic pattern inference from visible person-like emails.
+    locals_=[e.split("@")[0] for e in emails if "@" in e]
+    patterns=[]
+    for l in locals_:
+        if re.match(r"^[a-z]+\.[a-z]+$", l): patterns.append("firstname.lastname")
+        elif re.match(r"^[a-z][a-z]+$", l) and len(l)>5: patterns.append("firstname/lastname")
+        elif re.match(r"^[a-z]\.[a-z]+$", l): patterns.append("firstinitial.lastname")
+        elif re.match(r"^[a-z][a-z]+[._-][a-z][a-z]+$", l): patterns.append("firstname_separator_lastname")
+    if not patterns: return ""
+    return max(set(patterns), key=patterns.count)
 
+def extract_links_from_html(base_url, html):
+    soup=BeautifulSoup(html or "", "html.parser")
+    links=[]
+    for a in soup.find_all("a", href=True):
+        href=urljoin(base_url, a["href"])
+        text=a.get_text(" ", strip=True)
+        links.append({"url": normalize_url(href), "text": text})
+    return links
 
-def request_get(url: str):
-    try:
-        r = requests.get(norm_url(url), headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT, allow_redirects=True)
-        if r.status_code >= 400:
-            return None
-        ctype = r.headers.get("content-type", "").lower()
-        if "text/html" not in ctype and "application/xhtml" not in ctype and ctype:
-            return None
-        return r
-    except Exception:
-        return None
-
-
-def clean_text(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
-
-
-def soup_from_url(url: str):
-    r = request_get(url)
-    if not r:
-        return None, None
-    try:
-        return BeautifulSoup(r.text, "lxml"), r.url
-    except Exception:
-        return None, r.url
-
-
-def extract_source_links(source_urls):
-    rows = []
-    for src in source_urls:
-        soup, final_url = soup_from_url(src)
-        if not soup:
-            rows.append({"source_url": src, "status": "failed", "candidate_url": "", "anchor_text": ""})
+def extract_school_links_from_source_page(source_url):
+    res=safe_get(source_url)
+    rows=[]
+    logs=[f"Fetch {source_url}: status={res['status']} ok={res['ok']} error={res['error']}"]
+    if not res["ok"]:
+        return rows, logs
+    links=extract_links_from_html(res["url"], res["text"])
+    source_dom=domain(res["url"])
+    for l in links:
+        u=l["url"]; d=domain(u); text=l["text"]
+        if not d or d==source_dom: 
             continue
-        for a in soup.find_all("a", href=True):
-            href = urljoin(final_url, a.get("href"))
-            text = clean_text(a.get_text(" "))[:120]
-            if is_probably_school_site(href, text):
-                rows.append({"source_url": final_url, "status": "candidate", "candidate_url": href.split("#")[0], "anchor_text": text})
-    # Deduplicate by domain
-    seen = set()
-    out = []
-    for row in rows:
-        d = domain_of(row.get("candidate_url", ""))
-        if row["status"] == "candidate" and d in seen:
+        if looks_directory(u, text):
             continue
-        if d:
-            seen.add(d)
-        out.append(row)
-    return pd.DataFrame(out)
+        if looks_school_name(text) or looks_school_name(u):
+            rows.append({"name": text or d, "website": u, "source": source_url, "method": "source_page_outbound_link"})
+    # de-dupe by domain
+    seen=set(); dedup=[]
+    for r in rows:
+        d=domain(r["website"])
+        if d not in seen:
+            seen.add(d); dedup.append(r)
+    logs.append(f"Extracted {len(dedup)} candidate outbound school links")
+    return dedup, logs
 
+def nominatim_geocode(place):
+    url="https://nominatim.openstreetmap.org/search"
+    params={"q": place, "format":"json", "limit":1}
+    try:
+        r=requests.get(url, params=params, headers=HEADERS, timeout=20)
+        if r.status_code>=400: return None, f"Nominatim status {r.status_code}: {r.text[:200]}"
+        data=r.json()
+        if not data: return None, "Nominatim returned zero locations"
+        return {"lat": float(data[0]["lat"]), "lon": float(data[0]["lon"]), "display_name": data[0].get("display_name","")}, ""
+    except Exception as e:
+        return None, str(e)
 
-def geocode_location(location: str):
-    geo_url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": location, "format": "json", "limit": 1, "addressdetails": 1}
-    r = requests.get(geo_url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    if not data:
-        return None
-    item = data[0]
-    return {
-        "lat": float(item["lat"]),
-        "lon": float(item["lon"]),
-        "display_name": item.get("display_name", location),
-        "osm_type": item.get("osm_type", ""),
-        "osm_id": item.get("osm_id", ""),
-        "class": item.get("class", ""),
-        "type": item.get("type", ""),
-    }
-
-
-def build_amenity_filters(school_types):
-    amenities = []
-    if "Schools" in school_types:
-        amenities += ["school", "kindergarten"]
-    if "Universities / Colleges" in school_types:
-        amenities += ["university", "college"]
-    if not amenities:
-        amenities = ["school", "college", "university"]
-    clauses = []
-    for amenity in amenities:
-        for obj in ["node", "way", "relation"]:
-            clauses.append(f'{obj}["amenity"="{amenity}"]')
-    return clauses
-
-
-def overpass_request(query: str):
-    endpoints = [
+def overpass_query(lat, lon, radius_km, max_results):
+    radius=int(radius_km*1000)
+    q=f"""
+    [out:json][timeout:30];
+    (
+      node(around:{radius},{lat},{lon})["amenity"~"school|college|university|kindergarten"];
+      way(around:{radius},{lat},{lon})["amenity"~"school|college|university|kindergarten"];
+      relation(around:{radius},{lat},{lon})["amenity"~"school|college|university|kindergarten"];
+      node(around:{radius},{lat},{lon})["school"];
+      way(around:{radius},{lat},{lon})["school"];
+      relation(around:{radius},{lat},{lon})["school"];
+    );
+    out center tags {max_results};
+    """
+    endpoints=[
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.openstreetmap.ru/api/interpreter",
+        "https://overpass.osm.ch/api/interpreter"
     ]
-    last_err = None
-    for endpoint in endpoints:
+    logs=[]
+    for ep in endpoints:
         try:
-            res = requests.post(endpoint, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=45)
-            res.raise_for_status()
-            return res.json(), endpoint
+            r=requests.post(ep, data={"data":q}, headers=HEADERS, timeout=45)
+            logs.append(f"Overpass {ep}: status={r.status_code}, bytes={len(r.text)}")
+            if r.status_code<400:
+                data=r.json()
+                elements=data.get("elements", [])
+                rows=[]
+                for e in elements:
+                    tags=e.get("tags", {})
+                    name=tags.get("name") or tags.get("operator") or ""
+                    website=tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
+                    email=tags.get("email") or tags.get("contact:email") or ""
+                    phone=tags.get("phone") or tags.get("contact:phone") or ""
+                    if not name and not website: continue
+                    if not looks_school_name(name) and tags.get("amenity") not in ["school","college","university","kindergarten"]:
+                        continue
+                    rows.append({
+                        "name": name or domain(website),
+                        "website": normalize_url(website) if website else "",
+                        "email": email,
+                        "phone": phone,
+                        "osm_type": e.get("type",""),
+                        "osm_id": e.get("id",""),
+                        "source": "OpenStreetMap",
+                        "method": "osm_radius"
+                    })
+                return rows[:max_results], logs
         except Exception as e:
-            last_err = e
-            continue
-    raise RuntimeError(f"All Overpass endpoints failed: {last_err}")
+            logs.append(f"Overpass {ep}: ERROR {e}")
+    return [], logs
 
-
-def element_to_row(e, location, source_note):
-    tags = e.get("tags", {}) or {}
-    name = tags.get("name") or tags.get("official_name") or tags.get("operator") or ""
-    if not name:
-        return None
-    website = tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
-    email = tags.get("email") or tags.get("contact:email") or ""
-    phone = tags.get("phone") or tags.get("contact:phone") or ""
-    lat = e.get("lat") or e.get("center", {}).get("lat")
-    lon = e.get("lon") or e.get("center", {}).get("lon")
-    return {
-        "school_name": name,
-        "location_query": location,
-        "source": source_note,
-        "website": norm_url(website) if website else "",
-        "osm_email": email,
-        "osm_phone": phone,
-        "lat": lat,
-        "lon": lon,
-        "raw_type": tags.get("amenity", ""),
-        "osm_tags": ", ".join([f"{k}={v}" for k, v in list(tags.items())[:12]]),
-    }
-
-
-def overpass_query(location: str, school_types, limit: int, radius_km: int = 50):
-    """Robust OSM discovery.
-
-    v7 used a single Overpass syntax that could return nothing/fail on cloud.
-    v8 uses geocoding + radius search, multiple Overpass mirrors, and a corrected output clause.
-    """
-    geo = geocode_location(location)
-    if not geo:
-        return pd.DataFrame()
-    lat, lon = geo["lat"], geo["lon"]
-    radius = max(5000, min(int(radius_km) * 1000, 150000))
-    clauses = build_amenity_filters(school_types)
-
-    # Radius query is most reliable across arbitrary city names.
-    body = "\n".join(f"  {clause}(around:{radius},{lat},{lon});" for clause in clauses)
-    query = f"""
-[out:json][timeout:35];
-(
-{body}
-);
-out center qt {int(limit)};
-"""
-    payload, endpoint = overpass_request(query)
-    elements = payload.get("elements", [])[:limit]
-    rows = []
-    for e in elements:
-        row = element_to_row(e, location, f"OpenStreetMap radius {radius_km}km via {endpoint.split('//')[-1].split('/')[0]}")
-        if row:
-            rows.append(row)
-    return pd.DataFrame(rows)
-
-def find_candidate_pages(base_url: str, soup):
-    candidates = []
-    base_domain = domain_of(base_url)
-    candidates.append(base_url)
-    for a in soup.find_all("a", href=True):
-        text = clean_text(a.get_text(" ")).lower()
-        href = urljoin(base_url, a["href"])
-        if domain_of(href) != base_domain:
-            continue
-        low = href.lower() + " " + text
-        if any(h in low for h in CONTACT_PATH_HINTS):
-            candidates.append(href.split("#")[0])
-    # Deduplicate, cap
-    out = []
-    seen = set()
-    for u in candidates:
-        if u not in seen:
-            out.append(u)
-            seen.add(u)
-    return out[:MAX_PAGES_PER_SCHOOL]
-
-
-def infer_email_pattern(emails):
-    local_parts = [e.split("@")[0].lower() for e in emails if "@" in e]
-    if len(local_parts) < 2:
-        return ""
-    patterns = []
-    for lp in local_parts:
-        if "." in lp and all(part.isalpha() for part in lp.split(".")[:2]):
-            patterns.append("firstname.lastname")
-        elif "_" in lp and all(part.isalpha() for part in lp.split("_")[:2]):
-            patterns.append("firstname_lastname")
-        elif re.match(r"^[a-z][a-z]+[.\-_]?[a-z]+$", lp):
-            patterns.append("name_based")
-    if patterns:
-        return max(set(patterns), key=patterns.count)
-    return ""
-
-
-def extract_people_candidates(text):
-    # Conservative name/title extraction from nearby role keyword lines.
-    candidates = []
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", text)
-    for sent in sentences:
-        s = clean_text(sent)
-        low = s.lower()
-        matched_roles = [role for role, kws in ROLE_KEYWORDS.items() if any(k in low for k in kws)]
-        if not matched_roles:
-            continue
-        # Capture title-case names of 2-4 words, excluding common role terms
-        names = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b", s)
-        for name in names[:3]:
-            if any(w.lower() in ["Head", "School", "Learning", "Support", "Admissions", "Principal"] for w in name.split()):
-                continue
-            candidates.append({"name": name, "roles": ",".join(matched_roles), "evidence": s[:220]})
-    # Deduplicate by name-role
-    seen = set(); out = []
-    for c in candidates:
-        key = (c["name"], c["roles"])
-        if key not in seen:
-            out.append(c); seen.add(key)
-    return out[:10]
-
-
-def make_inferred_emails(people, domain, pattern):
-    if not pattern or not domain:
-        return []
-    out = []
-    for p in people:
-        parts = re.sub(r"[^A-Za-z\s]", "", p["name"]).lower().split()
-        if len(parts) < 2:
-            continue
-        first, last = parts[0], parts[-1]
-        if pattern == "firstname.lastname":
-            email = f"{first}.{last}@{domain}"
-        elif pattern == "firstname_lastname":
-            email = f"{first}_{last}@{domain}"
-        else:
-            continue
-        out.append(f"{p['name']} ({p['roles']}): {email} [UNVERIFIED]")
-    return out
-
-
-def score_fit(text):
-    low = f" {text.lower()} "
-    score = 0
-    hits = []
-    weights = {
-        "international": 2,
-        "university_counseling": 3,
-        "learning_support": 3,
-        "ai_innovation": 2,
-        "inclusion": 2,
-        "parent": 1,
-    }
-    for category, kws in FIT_KEYWORDS.items():
-        if any(k in low for k in kws):
-            score += weights[category]
-            hits.append(category)
-    return score, ", ".join(hits)
-
-
-def scrape_school(row):
-    website = row.get("website", "") or row.get("candidate_url", "")
-    website = norm_url(website)
-    result = dict(row)
-    if not website:
-        result.update({"scrape_status": "no website", "verified_emails": "", "generic_emails": "", "phone_numbers": "", "pages_scraped": "", "role_signals": "", "fit_score": 0, "fit_signals": "", "contact_confidence": "low", "inferred_email_pattern": "", "inferred_contacts": ""})
-        return result
-    soup, final_url = soup_from_url(website)
-    if not soup:
-        result.update({"scrape_status": "failed", "verified_emails": "", "generic_emails": "", "phone_numbers": "", "pages_scraped": "", "role_signals": "", "fit_score": 0, "fit_signals": "", "contact_confidence": "low", "inferred_email_pattern": "", "inferred_contacts": ""})
-        return result
-    pages = find_candidate_pages(final_url, soup)
-    all_text = ""
-    all_emails = set()
-    all_phones = set()
-    pages_ok = []
-    for p in pages:
-        psoup, pfinal = soup_from_url(p)
-        if not psoup:
-            continue
-        pages_ok.append(pfinal)
-        text = clean_text(psoup.get_text(" "))
-        all_text += "\n" + text[:20000]
-        all_emails.update(e.lower() for e in EMAIL_RE.findall(text))
-        all_phones.update(clean_text(x) for x in PHONE_RE.findall(text))
-        # mailto links
-        for a in psoup.find_all("a", href=True):
-            href = a["href"]
-            if href.lower().startswith("mailto:"):
-                all_emails.add(href[7:].split("?")[0].strip().lower())
-        time.sleep(0.15)
-    generic = sorted([e for e in all_emails if e.split("@")[0] in ["info", "office", "admin", "admissions", "admission", "enquiries", "enquiry", "contact", "reception"]])
-    role_hits = []
-    low = all_text.lower()
-    for role, kws in ROLE_KEYWORDS.items():
-        if any(k in low for k in kws):
-            role_hits.append(role)
-    fit_score, fit_signals = score_fit(all_text)
-    pattern = infer_email_pattern(sorted(all_emails))
-    people = extract_people_candidates(all_text)
-    domain = domain_of(final_url)
-    inferred = make_inferred_emails(people, domain, pattern)
-    if all_emails and ("staff" in " ".join(pages_ok).lower() or len(all_emails) >= 2):
-        confidence = "high"
-    elif all_emails or role_hits:
-        confidence = "medium"
-    else:
-        confidence = "low"
-    title = soup.title.get_text(" ").strip() if soup.title else ""
-    if not result.get("school_name"):
-        result["school_name"] = title[:100]
+def scrape_school_website(row, max_pages=8):
+    website=normalize_url(row.get("website",""))
+    result=dict(row)
     result.update({
-        "website": final_url,
-        "scrape_status": "ok",
-        "verified_emails": "; ".join(sorted(all_emails)),
-        "generic_emails": "; ".join(generic),
-        "phone_numbers": "; ".join(sorted(all_phones)[:8]),
-        "pages_scraped": "; ".join(pages_ok),
-        "role_signals": ", ".join(role_hits),
-        "fit_score": fit_score,
-        "fit_signals": fit_signals,
-        "contact_confidence": confidence,
-        "inferred_email_pattern": pattern,
-        "people_candidates": " | ".join([f"{p['name']} ({p['roles']})" for p in people]),
-        "inferred_contacts": " | ".join(inferred),
+        "generic_emails":"",
+        "all_visible_emails":"",
+        "email_pattern":"",
+        "role_signals":"",
+        "fit_score":0,
+        "contact_confidence":0,
+        "scraped_pages":"",
+        "scrape_notes":""
     })
+    if not website:
+        result["scrape_notes"]="No website available from source."
+        return result
+    home=safe_get(website, timeout=15)
+    notes=[f"home status={home['status']} ok={home['ok']}"]
+    if not home["ok"]:
+        result["scrape_notes"]="; ".join(notes+[home["error"]])
+        return result
+    pages=[home["url"]]
+    links=extract_links_from_html(home["url"], home["text"])
+    for l in links:
+        lower=(l["url"]+" "+l["text"]).lower()
+        if domain(l["url"])==domain(home["url"]) and any(h in lower for h in CONTACT_PAGE_HINTS):
+            if l["url"] not in pages:
+                pages.append(l["url"])
+        if len(pages)>=max_pages:
+            break
+    combined=""
+    all_emails=set()
+    fetched=[]
+    for p in pages[:max_pages]:
+        pr=safe_get(p, timeout=12)
+        fetched.append(f"{p} ({pr['status']})")
+        if pr["ok"]:
+            text=BeautifulSoup(pr["text"], "html.parser").get_text(" ", strip=True)
+            combined += "\n" + text[:30000]
+            all_emails.update(emails_from_text(pr["text"] + " " + text))
+    role_hits=[]
+    lower=combined.lower()
+    fit=0
+    for cat, kws in ROLE_KEYWORDS.items():
+        if any(k in lower for k in kws):
+            role_hits.append(cat)
+    for cat,kws in FIT_KEYWORDS.items():
+        if any(k in lower for k in kws):
+            fit += {"international":2, "learning_support":3, "counseling":2, "ai_innovation":1, "parent":1}.get(cat,1)
+    generic=[e for e in all_emails if e.split("@")[0].lower() in ["info","office","admin","admissions","enquiries","enquiry","contact","principal","registrar"]]
+    pattern=infer_pattern(sorted(all_emails))
+    confidence=0
+    if all_emails: confidence += 40
+    if generic: confidence += 15
+    if role_hits: confidence += 20
+    if pattern: confidence += 15
+    if len(fetched)>1: confidence += 10
+    result["all_visible_emails"]=", ".join(sorted(all_emails))
+    result["generic_emails"]=", ".join(sorted(generic))
+    result["email_pattern"]=pattern
+    result["role_signals"]=", ".join(role_hits)
+    result["fit_score"]=fit
+    result["contact_confidence"]=min(confidence,100)
+    result["scraped_pages"]=" | ".join(fetched[:max_pages])
+    result["scrape_notes"]="; ".join(notes)
     return result
 
-
 def to_excel_bytes(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="prospects")
-    return output.getvalue()
+    bio=BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="schools")
+    return bio.getvalue()
 
+st.title("School Discovery Engine")
+st.caption(APP_VERSION)
 
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
-st.caption("Free workflow: discover schools by location, scrape public websites, score fit, and export Airtable-ready prospect data.")
+with st.expander("How this version works", expanded=False):
+    st.write("""
+This version does not rely on Google/DuckDuckGo scraping. It has three paths:
+1. Location search via OpenStreetMap/Nominatim/Overpass.
+2. Source/list page extraction: paste best-schools/directories and it extracts official school links.
+3. Direct school URLs: paste websites you already know.
+
+After discovery, it scrapes each school website for contact pages, emails, role signals, and fit/contact confidence.
+""")
+
+tab1, tab2, tab3 = st.tabs(["1. Discover", "2. Scrape & score", "3. Debug"])
 
 with st.sidebar:
-    st.header("1) Discovery inputs")
-    locations_text = st.text_area("Locations, one per line", value="Cape Town, South Africa\nJohannesburg, South Africa", height=100)
-    school_types = st.multiselect("Institution types", ["Schools", "Universities / Colleges"], default=["Schools"])
-    max_results = st.slider("Max OSM results per location", 5, 200, 50, 5)
-    radius_km = st.slider("Search radius around location (km)", 10, 150, 50, 10)
+    st.header("Discovery settings")
+    location=st.text_input("City / metro / location", value="Cape Town, Western Cape, South Africa")
+    radius=st.slider("Radius km", 5, 250, 100)
+    max_results=st.slider("Max OSM results", 10, 500, 150)
     st.divider()
-    source_urls_text = st.text_area("Optional source/list pages or known school URLs, one per line", placeholder="https://example.com/best-international-schools-cape-town\nhttps://school.edu", height=120)
-    scrape_after_discovery = st.checkbox("Scrape websites after discovery", value=True)
+    source_pages=st.text_area("Optional: paste source/list pages, one per line", height=120, placeholder="https://example.com/best-schools-in-cape-town")
+    direct_urls=st.text_area("Optional: paste official school URLs, one per line", height=120, placeholder="https://www.schoolname.org")
+    scrape_now=st.checkbox("Scrape websites after discovery", value=True)
+    max_pages=st.slider("Max pages per school to scrape", 1, 12, 6)
 
-if "schools_df" not in st.session_state:
-    st.session_state.schools_df = pd.DataFrame()
-if "scraped_df" not in st.session_state:
-    st.session_state.scraped_df = pd.DataFrame()
+if "candidates" not in st.session_state:
+    st.session_state.candidates=pd.DataFrame()
+if "logs" not in st.session_state:
+    st.session_state.logs=[]
 
-col1, col2 = st.columns([1, 1])
-with col1:
-    if st.button("Find schools", type="primary"):
-        dfs = []
-        errors = []
-        for loc in [x.strip() for x in locations_text.splitlines() if x.strip()]:
-            try:
-                with st.spinner(f"Searching OpenStreetMap for {loc}..."):
-                    dfs.append(overpass_query(loc, school_types, max_results, radius_km))
-            except Exception as e:
-                errors.append(f"{loc}: {e}")
-        # Source URL extraction
-        source_urls = [x.strip() for x in source_urls_text.splitlines() if x.strip()]
-        if source_urls:
-            with st.spinner("Extracting school links from source URLs..."):
-                link_df = extract_source_links(source_urls)
-                if not link_df.empty:
-                    candidates = link_df[link_df["status"] == "candidate"].copy()
-                    if not candidates.empty:
-                        candidates["school_name"] = candidates["anchor_text"]
-                        candidates["website"] = candidates["candidate_url"]
-                        candidates["source"] = "Source page extraction"
-                        dfs.append(candidates[["school_name", "website", "source", "source_url"]])
-                    # Also include directly pasted likely school URLs
-                    direct_rows = []
-                    for u in source_urls:
-                        if is_probably_school_site(u):
-                            direct_rows.append({"school_name": "", "website": norm_url(u), "source": "Direct URL"})
-                    if direct_rows:
-                        dfs.append(pd.DataFrame(direct_rows))
-        if dfs:
-            df = pd.concat(dfs, ignore_index=True)
-            df["website"] = df.get("website", pd.Series([""] * len(df))).fillna("").map(norm_url)
-            # Deduplicate: website domain first, else name+location
-            df["_dedupe"] = df.apply(lambda r: domain_of(r.get("website", "")) or (str(r.get("school_name", "")).lower() + str(r.get("location_query", "")).lower()), axis=1)
-            df = df[df["_dedupe"] != ""].drop_duplicates("_dedupe").drop(columns=["_dedupe"])
-            st.session_state.schools_df = df
-            st.session_state.scraped_df = pd.DataFrame()
-            st.success(f"Found {len(df)} candidate schools/institutions.")
-            if errors:
-                st.warning("Some locations had errors: " + " | ".join(errors[:3]))
+with tab1:
+    if st.button("Find candidates", type="primary"):
+        logs=[]
+        rows=[]
+        # OSM path
+        geo, err=nominatim_geocode(location)
+        if geo:
+            logs.append(f"Geocoded: {geo['display_name']} ({geo['lat']}, {geo['lon']})")
+            osm_rows, osm_logs=overpass_query(geo["lat"], geo["lon"], radius, max_results)
+            logs += osm_logs
+            logs.append(f"OSM candidate rows: {len(osm_rows)}")
+            rows += osm_rows
         else:
-            st.warning("No candidates found. Try a broader city/metro, increase max results, or paste a source/list page.")
-
-with col2:
-    if st.button("Scrape candidate websites"):
-        df = st.session_state.schools_df.copy()
+            logs.append(f"Geocoding failed: {err}")
+        # source pages
+        for line in source_pages.splitlines():
+            u=normalize_url(line)
+            if u:
+                sr, slogs=extract_school_links_from_source_page(u)
+                logs += slogs
+                rows += sr
+        # direct urls
+        for line in direct_urls.splitlines():
+            u=normalize_url(line)
+            if u:
+                rows.append({"name": domain(u), "website": u, "source": "manual_url", "method": "manual_url"})
+        # dedupe by domain/name
+        seen=set(); dedup=[]
+        for r in rows:
+            key=domain(r.get("website","")) or (r.get("name","").lower())
+            if not key or key in seen: continue
+            seen.add(key); dedup.append(r)
+        df=pd.DataFrame(dedup)
+        st.session_state.candidates=df
+        st.session_state.logs=logs
         if df.empty:
-            st.warning("Find schools first, or paste known school/source URLs and click Find schools.")
+            st.warning("No candidates found. Check Debug tab to see whether geocoding, Overpass, or filtering failed. Try a source page or direct URLs as fallback.")
         else:
-            rows = []
-            progress = st.progress(0)
-            for i, row in df.iterrows():
-                rows.append(scrape_school(row.to_dict()))
-                progress.progress((len(rows)) / len(df))
-            out = pd.DataFrame(rows)
-            # Sort high value first
-            if "fit_score" in out.columns:
-                out = out.sort_values(["fit_score", "contact_confidence"], ascending=[False, True])
-            st.session_state.scraped_df = out
-            st.success(f"Scraped {len(out)} school records.")
+            st.success(f"Found {len(df)} candidate schools/sites.")
+            st.dataframe(df, use_container_width=True)
+    elif not st.session_state.candidates.empty:
+        st.dataframe(st.session_state.candidates, use_container_width=True)
 
-st.divider()
+with tab2:
+    df=st.session_state.candidates
+    if df.empty:
+        st.info("Run discovery first, or paste direct URLs/source pages in the sidebar.")
+    else:
+        if st.button("Scrape websites + score contacts"):
+            progress=st.progress(0)
+            out=[]
+            for i,row in df.iterrows():
+                out.append(scrape_school_website(row.to_dict(), max_pages=max_pages))
+                progress.progress((len(out))/len(df))
+                time.sleep(0.05)
+            res=pd.DataFrame(out)
+            st.session_state.candidates=res
+            st.success(f"Scraped {len(res)} candidates.")
+            st.dataframe(res, use_container_width=True)
+        else:
+            st.dataframe(df, use_container_width=True)
+        csv=st.session_state.candidates.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", data=csv, file_name="school_discovery_results.csv", mime="text/csv")
+        try:
+            xbytes=to_excel_bytes(st.session_state.candidates)
+            st.download_button("Download Excel", data=xbytes, file_name="school_discovery_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as e:
+            st.caption(f"Excel export unavailable: {e}")
 
-base_df = st.session_state.scraped_df if not st.session_state.scraped_df.empty else st.session_state.schools_df
-
-if base_df.empty:
-    st.info("Start by entering locations and clicking Find schools. Optional: paste listicle/directory pages to extract official school websites.")
-else:
-    st.subheader("Results")
-    filter_cols = st.columns(4)
-    with filter_cols[0]:
-        min_fit = st.number_input("Minimum fit score", min_value=0, max_value=20, value=0)
-    with filter_cols[1]:
-        require_email = st.checkbox("Require visible email", value=False)
-    with filter_cols[2]:
-        confidence_filter = st.multiselect("Contact confidence", ["high", "medium", "low"], default=["high", "medium", "low"])
-    with filter_cols[3]:
-        keyword_filter = st.text_input("Keyword filter", placeholder="learning support, IB, admissions")
-
-    view = base_df.copy()
-    if "fit_score" in view.columns:
-        view = view[pd.to_numeric(view["fit_score"], errors="coerce").fillna(0) >= min_fit]
-    if require_email and "verified_emails" in view.columns:
-        view = view[view["verified_emails"].fillna("").str.len() > 0]
-    if "contact_confidence" in view.columns:
-        view = view[view["contact_confidence"].fillna("low").isin(confidence_filter)]
-    if keyword_filter:
-        mask = view.astype(str).apply(lambda col: col.str.contains(keyword_filter, case=False, na=False)).any(axis=1)
-        view = view[mask]
-
-    st.dataframe(view, use_container_width=True, height=460)
-
-    st.download_button("Download CSV", data=view.to_csv(index=False).encode("utf-8"), file_name="school_prospects_v8.csv", mime="text/csv")
-    st.download_button("Download Excel", data=to_excel_bytes(view), file_name="school_prospects_v8.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-st.divider()
-st.caption("Note: Visible emails are public page findings. Inferred contacts are unverified guesses and should be reviewed before outreach.")
+with tab3:
+    st.subheader("Diagnostics")
+    st.write("Use this when the hosted app returns no results.")
+    if st.button("Run connectivity tests"):
+        tests=[
+            ("Nominatim", "https://nominatim.openstreetmap.org/search?q=Cape%20Town&format=json&limit=1"),
+            ("Overpass", "https://overpass-api.de/api/status"),
+            ("Example school site", "https://www.bishops.org.za/")
+        ]
+        for name,url in tests:
+            res=safe_get(url, timeout=20)
+            st.write(f"**{name}**: status={res['status']} ok={res['ok']} error={res['error']}")
+            if res["text"]:
+                st.code(res["text"][:500])
+    st.subheader("Last run logs")
+    if st.session_state.logs:
+        for l in st.session_state.logs:
+            st.text(l)
+    else:
+        st.caption("No logs yet.")

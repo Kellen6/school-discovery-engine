@@ -1,56 +1,45 @@
-# School Discovery Engine Free v8
+# School Discovery Engine Free v9
 
-This is the Streamlit-hosted/free workflow version.
+Cloud-safe Streamlit app for Laura's school outreach.
 
-## What changed in v8
+## What v9 changes
 
-v7 could return `No candidates found` because the Overpass/OpenStreetMap query was too brittle on Streamlit Cloud.
-
-v8 fixes this by:
-
-- Using Nominatim geocoding for the location.
-- Searching within a configurable radius around the city/metro.
-- Using corrected Overpass syntax.
-- Trying multiple public Overpass endpoints.
-- Increasing default max results.
-- Keeping source/list-page extraction and school website scraping.
-
-## What it does
-
-- Finds schools/universities/colleges by location using OpenStreetMap.
-- Lets you paste source/list pages and known school URLs.
-- Scrapes candidate school websites for public contact details.
-- Extracts visible emails, generic emails, phone numbers, role signals, staff/contact/admissions/support pages.
-- Infers email patterns only when enough visible emails exist.
-- Scores Laura-fit based on international curriculum, learning support/SEN, university counseling, AI/innovation, inclusion, admissions, and parent signals.
-- Exports CSV/Excel for Airtable.
+- Does not rely on Google/DuckDuckGo scraping.
+- Uses three discovery paths:
+  1. Location search via Nominatim + OpenStreetMap Overpass.
+  2. Source/list pages: paste "best schools" or directory URLs and it extracts official school links.
+  3. Direct school URLs.
+- Adds a Debug tab to show exactly where hosted discovery is failing.
+- Scrapes discovered school websites for:
+  - contact/admissions/staff pages
+  - visible emails
+  - generic emails
+  - role signals
+  - email pattern inference
+  - fit score
+  - contact confidence
+- Exports CSV and Excel.
 
 ## Run locally
 
 ```bash
-cd ~/Downloads/school_discovery_engine_free_v8
+cd school_discovery_engine_free_v9
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy on Streamlit Community Cloud
+## Deploy to Streamlit Community Cloud
 
-Upload/replace these files in GitHub:
+Upload `app.py`, `requirements.txt`, and `README.md` to your GitHub repo, commit, then reboot your Streamlit app.
 
-- app.py
-- requirements.txt
-- README.md
+## Usage
 
-Then reboot the app in Streamlit.
+Start with:
 
-## If a city still returns no results
+- Location: `Cape Town, Western Cape, South Africa`
+- Radius: `100 km`
+- Max OSM results: `150`
 
-Try:
-
-- Increase radius to 100–150 km.
-- Increase max results to 100–200.
-- Use a more specific metro/city: `Cape Town, Western Cape, South Africa` instead of just `Cape Town`.
-- Paste one or two source/list pages; the app will use them as discovery sources and extract official school sites.
-
+If no results appear, open the Debug tab and run connectivity tests. If Overpass is blocked or empty, paste source pages or official school URLs in the sidebar.
