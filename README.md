@@ -1,26 +1,34 @@
-# School Discovery Engine Free v7
+# School Discovery Engine Free v8
 
-A free Streamlit app for discovering schools by location and scraping public school websites for contact details.
+This is the Streamlit-hosted/free workflow version.
 
-## What v7 does
+## What changed in v8
 
-- Finds candidate schools using OpenStreetMap / Overpass by location.
-- Optionally extracts official school links from pasted source/list pages.
-- Scrapes school homepages, contact pages, admissions pages, staff/team pages, leadership pages, and support pages.
-- Extracts visible emails, phone numbers, titles, role signals, and page sources.
-- Detects generic emails such as info@, admissions@, office@.
-- Attempts to infer email patterns only when multiple visible staff emails exist.
-- Scores fit for Laura's outreach based on curriculum, learning support/SEN, university counseling, AI/innovation, inclusion, admissions, and parent signals.
-- Exports Airtable-ready CSV and Excel files.
+v7 could return `No candidates found` because the Overpass/OpenStreetMap query was too brittle on Streamlit Cloud.
 
-## Important limitations
+v8 fixes this by:
 
-This app only uses public web pages. It does not bypass paywalls, CAPTCHAs, robots restrictions, or JavaScript-only content. Inferred emails are guesses and are clearly marked as unverified.
+- Using Nominatim geocoding for the location.
+- Searching within a configurable radius around the city/metro.
+- Using corrected Overpass syntax.
+- Trying multiple public Overpass endpoints.
+- Increasing default max results.
+- Keeping source/list-page extraction and school website scraping.
 
-## Run locally on Mac
+## What it does
+
+- Finds schools/universities/colleges by location using OpenStreetMap.
+- Lets you paste source/list pages and known school URLs.
+- Scrapes candidate school websites for public contact details.
+- Extracts visible emails, generic emails, phone numbers, role signals, staff/contact/admissions/support pages.
+- Infers email patterns only when enough visible emails exist.
+- Scores Laura-fit based on international curriculum, learning support/SEN, university counseling, AI/innovation, inclusion, admissions, and parent signals.
+- Exports CSV/Excel for Airtable.
+
+## Run locally
 
 ```bash
-cd ~/Downloads/school_discovery_engine_free_v7
+cd ~/Downloads/school_discovery_engine_free_v8
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -29,28 +37,20 @@ streamlit run app.py
 
 ## Deploy on Streamlit Community Cloud
 
-1. Upload these files to a public GitHub repo:
-   - app.py
-   - requirements.txt
-   - README.md
-2. Go to https://share.streamlit.io
-3. Create a new app from that GitHub repo.
-4. Main file path: `app.py`
-5. Deploy.
+Upload/replace these files in GitHub:
 
-## Suggested workflow
+- app.py
+- requirements.txt
+- README.md
 
-1. Enter a location such as `Cape Town, South Africa` or `Lagos, Nigeria`.
-2. Select school types and max results.
-3. Click `Find schools`.
-4. Review candidates.
-5. Click `Scrape selected/candidate school websites`.
-6. Download CSV/Excel and upload to Airtable.
+Then reboot the app in Streamlit.
 
-## Columns to watch
+## If a city still returns no results
 
-- `verified_emails`: emails visibly found on public pages.
-- `inferred_email_pattern`: detected pattern if enough visible emails exist.
-- `inferred_contacts`: possible unverified emails generated from names/titles.
-- `contact_confidence`: high/medium/low based on visible contacts and staff pages.
-- `fit_score`: Laura-fit score for outreach prioritization.
+Try:
+
+- Increase radius to 100–150 km.
+- Increase max results to 100–200.
+- Use a more specific metro/city: `Cape Town, Western Cape, South Africa` instead of just `Cape Town`.
+- Paste one or two source/list pages; the app will use them as discovery sources and extract official school sites.
+

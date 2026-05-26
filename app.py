@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-APP_TITLE = "School Discovery Engine — Free v7"
+APP_TITLE = "School Discovery Engine — Free v8"
 USER_AGENT = "Mozilla/5.0 (compatible; SchoolDiscoveryEngine/7.0; public school outreach research)"
 TIMEOUT = 15
 MAX_PAGES_PER_SCHOOL = 8
@@ -127,60 +127,113 @@ def extract_source_links(source_urls):
     return pd.DataFrame(out)
 
 
-def overpass_query(location: str, school_types, limit: int):
-    # Nominatim geocode
+def geocode_location(location: str):
     geo_url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": location, "format": "json", "limit": 1}
-    g = requests.get(geo_url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
-    g.raise_for_status()
-    data = g.json()
+    params = {"q": location, "format": "json", "limit": 1, "addressdetails": 1}
+    r = requests.get(geo_url, params=params, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
     if not data:
-        return pd.DataFrame()
-    lat, lon = float(data[0]["lat"]), float(data[0]["lon"])
-    radius = 35000
-    amenity_filters = []
+        return None
+    item = data[0]
+    return {
+        "lat": float(item["lat"]),
+        "lon": float(item["lon"]),
+        "display_name": item.get("display_name", location),
+        "osm_type": item.get("osm_type", ""),
+        "osm_id": item.get("osm_id", ""),
+        "class": item.get("class", ""),
+        "type": item.get("type", ""),
+    }
+
+
+def build_amenity_filters(school_types):
+    amenities = []
     if "Schools" in school_types:
-        amenity_filters.append('node["amenity"="school"]')
-        amenity_filters.append('way["amenity"="school"]')
-        amenity_filters.append('relation["amenity"="school"]')
+        amenities += ["school", "kindergarten"]
     if "Universities / Colleges" in school_types:
-        amenity_filters.append('node["amenity"="university"]')
-        amenity_filters.append('way["amenity"="university"]')
-        amenity_filters.append('relation["amenity"="university"]')
-        amenity_filters.append('node["amenity"="college"]')
-        amenity_filters.append('way["amenity"="college"]')
-        amenity_filters.append('relation["amenity"="college"]')
-    body = "".join(f"{f}(around:{radius},{lat},{lon});" for f in amenity_filters)
-    query = f"""
-    [out:json][timeout:25];
-    (
-      {body}
-    );
-    out center tags {limit};
+        amenities += ["university", "college"]
+    if not amenities:
+        amenities = ["school", "college", "university"]
+    clauses = []
+    for amenity in amenities:
+        for obj in ["node", "way", "relation"]:
+            clauses.append(f'{obj}["amenity"="{amenity}"]')
+    return clauses
+
+
+def overpass_request(query: str):
+    endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
+    ]
+    last_err = None
+    for endpoint in endpoints:
+        try:
+            res = requests.post(endpoint, data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=45)
+            res.raise_for_status()
+            return res.json(), endpoint
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"All Overpass endpoints failed: {last_err}")
+
+
+def element_to_row(e, location, source_note):
+    tags = e.get("tags", {}) or {}
+    name = tags.get("name") or tags.get("official_name") or tags.get("operator") or ""
+    if not name:
+        return None
+    website = tags.get("website") or tags.get("contact:website") or tags.get("url") or ""
+    email = tags.get("email") or tags.get("contact:email") or ""
+    phone = tags.get("phone") or tags.get("contact:phone") or ""
+    lat = e.get("lat") or e.get("center", {}).get("lat")
+    lon = e.get("lon") or e.get("center", {}).get("lon")
+    return {
+        "school_name": name,
+        "location_query": location,
+        "source": source_note,
+        "website": norm_url(website) if website else "",
+        "osm_email": email,
+        "osm_phone": phone,
+        "lat": lat,
+        "lon": lon,
+        "raw_type": tags.get("amenity", ""),
+        "osm_tags": ", ".join([f"{k}={v}" for k, v in list(tags.items())[:12]]),
+    }
+
+
+def overpass_query(location: str, school_types, limit: int, radius_km: int = 50):
+    """Robust OSM discovery.
+
+    v7 used a single Overpass syntax that could return nothing/fail on cloud.
+    v8 uses geocoding + radius search, multiple Overpass mirrors, and a corrected output clause.
     """
-    res = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, headers={"User-Agent": USER_AGENT}, timeout=35)
-    res.raise_for_status()
-    elements = res.json().get("elements", [])[:limit]
+    geo = geocode_location(location)
+    if not geo:
+        return pd.DataFrame()
+    lat, lon = geo["lat"], geo["lon"]
+    radius = max(5000, min(int(radius_km) * 1000, 150000))
+    clauses = build_amenity_filters(school_types)
+
+    # Radius query is most reliable across arbitrary city names.
+    body = "\n".join(f"  {clause}(around:{radius},{lat},{lon});" for clause in clauses)
+    query = f"""
+[out:json][timeout:35];
+(
+{body}
+);
+out center qt {int(limit)};
+"""
+    payload, endpoint = overpass_request(query)
+    elements = payload.get("elements", [])[:limit]
     rows = []
     for e in elements:
-        tags = e.get("tags", {})
-        name = tags.get("name") or tags.get("operator") or ""
-        website = tags.get("website") or tags.get("contact:website") or ""
-        email = tags.get("email") or tags.get("contact:email") or ""
-        phone = tags.get("phone") or tags.get("contact:phone") or ""
-        rows.append({
-            "school_name": name,
-            "location_query": location,
-            "source": "OpenStreetMap",
-            "website": norm_url(website) if website else "",
-            "osm_email": email,
-            "osm_phone": phone,
-            "lat": e.get("lat") or e.get("center", {}).get("lat"),
-            "lon": e.get("lon") or e.get("center", {}).get("lon"),
-            "raw_type": tags.get("amenity", ""),
-        })
+        row = element_to_row(e, location, f"OpenStreetMap radius {radius_km}km via {endpoint.split('//')[-1].split('/')[0]}")
+        if row:
+            rows.append(row)
     return pd.DataFrame(rows)
-
 
 def find_candidate_pages(base_url: str, soup):
     candidates = []
@@ -368,7 +421,8 @@ with st.sidebar:
     st.header("1) Discovery inputs")
     locations_text = st.text_area("Locations, one per line", value="Cape Town, South Africa\nJohannesburg, South Africa", height=100)
     school_types = st.multiselect("Institution types", ["Schools", "Universities / Colleges"], default=["Schools"])
-    max_results = st.slider("Max OSM results per location", 5, 100, 25, 5)
+    max_results = st.slider("Max OSM results per location", 5, 200, 50, 5)
+    radius_km = st.slider("Search radius around location (km)", 10, 150, 50, 10)
     st.divider()
     source_urls_text = st.text_area("Optional source/list pages or known school URLs, one per line", placeholder="https://example.com/best-international-schools-cape-town\nhttps://school.edu", height=120)
     scrape_after_discovery = st.checkbox("Scrape websites after discovery", value=True)
@@ -386,7 +440,7 @@ with col1:
         for loc in [x.strip() for x in locations_text.splitlines() if x.strip()]:
             try:
                 with st.spinner(f"Searching OpenStreetMap for {loc}..."):
-                    dfs.append(overpass_query(loc, school_types, max_results))
+                    dfs.append(overpass_query(loc, school_types, max_results, radius_km))
             except Exception as e:
                 errors.append(f"{loc}: {e}")
         # Source URL extraction
@@ -471,8 +525,8 @@ else:
 
     st.dataframe(view, use_container_width=True, height=460)
 
-    st.download_button("Download CSV", data=view.to_csv(index=False).encode("utf-8"), file_name="school_prospects_v7.csv", mime="text/csv")
-    st.download_button("Download Excel", data=to_excel_bytes(view), file_name="school_prospects_v7.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("Download CSV", data=view.to_csv(index=False).encode("utf-8"), file_name="school_prospects_v8.csv", mime="text/csv")
+    st.download_button("Download Excel", data=to_excel_bytes(view), file_name="school_prospects_v8.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()
 st.caption("Note: Visible emails are public page findings. Inferred contacts are unverified guesses and should be reviewed before outreach.")
