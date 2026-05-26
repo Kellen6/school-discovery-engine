@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-APP_VERSION = "v19"
+APP_VERSION = "v20"
 UA = "SchoolDiscoveryEngine/19 contact: personal-research"
 TIMEOUT = 12
 
@@ -298,7 +298,7 @@ def scrape_page(url):
     return text, links
 
 
-def target_pages(homepage, sector_profile):
+def target_pages(homepage, sector_profile, max_pages=6):
     if not homepage:
         return []
     pages = [homepage]
@@ -317,10 +317,10 @@ def target_pages(homepage, sector_profile):
     for p in pages:
         if p not in seen:
             seen.append(p)
-    return seen[:10]
+    return seen[:max_pages]
 
 
-def search_contact_fallback(name, location_hint, region):
+def search_contact_fallback(name, location_hint, region, search_depth="Standard"):
     """Search web for contacts/phones when the official website is missing or incomplete.
     Returns emails, phones, source urls, and diagnostics.
     """
@@ -335,9 +335,9 @@ def search_contact_fallback(name, location_hint, region):
         diagnostics["search_fallback_executed"] = "no_name"
         return [], [], [], diagnostics
 
-    # Broader contact-intent queries. Keep bounded so Streamlit Cloud does not hang.
+    # Broader contact-intent queries, but bounded by depth so Streamlit Cloud stays responsive.
     loc = location_hint or ""
-    queries = [
+    all_queries = [
         f'"{name}" "phone"',
         f'"{name}" "contact"',
         f'"{name}" "admissions"',
@@ -348,11 +348,20 @@ def search_contact_fallback(name, location_hint, region):
         f'"{name}" "staff"',
         f'"{name}" "{loc}" "+27"' if country_code_from_location(loc) == "ZA" else f'"{name}" "{loc}" phone',
     ]
+    depth = (search_depth or "Standard").lower()
+    if depth.startswith("fast"):
+        max_queries, max_results, max_pages_to_scrape = 0, 0, 0
+    elif depth.startswith("deep"):
+        max_queries, max_results, max_pages_to_scrape = 7, 3, 8
+    else:
+        max_queries, max_results, max_pages_to_scrape = 3, 2, 3
+
     seen_urls = set()
-    for q in queries[:7]:
+    pages_scraped = 0
+    for q in all_queries[:max_queries]:
         diagnostics["search_queries_run"] += 1
         try:
-            results = ddg_html_search(q, max_results=4)
+            results = ddg_html_search(q, max_results=max_results)
         except Exception as e:
             diagnostics["search_errors"].append(f"{q}: {type(e).__name__}")
             results = []
@@ -363,17 +372,22 @@ def search_contact_fallback(name, location_hint, region):
             seen_urls.add(u)
             urls.append(u)
             diagnostics["search_result_urls_checked"] += 1
-            # Search snippets/titles sometimes contain email/phone, so inspect them too.
             snippet_text = " ".join([res.get("title", ""), res.get("url", "")])
             emails.update(extract_emails(snippet_text))
             phones.update(extract_phones(snippet_text, region))
-            text, _ = scrape_page(u)
-            if text:
-                emails.update(extract_emails(text))
-                phones.update(extract_phones(text, region))
-            if len(phones) >= 4 and len(emails) >= 3:
+            if pages_scraped < max_pages_to_scrape:
+                text, _ = scrape_page(u)
+                pages_scraped += 1
+                if text:
+                    emails.update(extract_emails(text))
+                    phones.update(extract_phones(text, region))
+            if depth.startswith("standard") and (len(phones) >= 2 or len(emails) >= 2):
                 break
-        if len(phones) >= 4 and len(emails) >= 3:
+            if depth.startswith("deep") and len(phones) >= 4 and len(emails) >= 3:
+                break
+        if depth.startswith("standard") and (len(phones) >= 2 or len(emails) >= 2):
+            break
+        if depth.startswith("deep") and len(phones) >= 4 and len(emails) >= 3:
             break
 
     diagnostics["search_found_emails_count"] = len(emails)
@@ -381,7 +395,7 @@ def search_contact_fallback(name, location_hint, region):
     diagnostics["search_errors"] = "; ".join(diagnostics["search_errors"][:5])
     return sorted(emails), sorted(phones), sorted(set(urls))[:8], diagnostics
 
-def enrich_one(row, location_hint, region, use_search_fallback):
+def enrich_one(row, location_hint, region, contact_depth):
     r = dict(row)
     name = str(r.get("school_name", "") or "")
     original_website = str(r.get("website", "") or "").strip()
@@ -403,7 +417,9 @@ def enrich_one(row, location_hint, region, use_search_fallback):
     scrape_failure_reason = ""
 
     if r.get("website"):
-        candidate_pages = target_pages(r["website"], r.get("sector", "Schools"))
+        depth_lower = (contact_depth or "Standard").lower()
+        max_site_pages = 4 if depth_lower.startswith("fast") else (10 if depth_lower.startswith("deep") else 6)
+        candidate_pages = target_pages(r["website"], r.get("sector", "Schools"), max_pages=max_site_pages)
         for p in candidate_pages:
             scrape_pages_attempted += 1
             text, _ = scrape_page(p)
@@ -430,8 +446,9 @@ def enrich_one(row, location_hint, region, use_search_fallback):
         "search_found_phones_count": 0,
         "search_errors": "",
     }
+    use_search_fallback = not (contact_depth or "Standard").lower().startswith("fast")
     if use_search_fallback and (not emails or not website_phones or not r.get("website") or (scrape_pages_attempted and not scrape_pages_successful)):
-        search_emails, search_phones, search_urls, search_diag = search_contact_fallback(name, location_hint, region)
+        search_emails, search_phones, search_urls, search_diag = search_contact_fallback(name, location_hint, region, search_depth=contact_depth)
         emails.update(search_emails)
 
     # Explicit merge hierarchy: website > search/directory > OSM.
@@ -501,7 +518,7 @@ def enrich_one(row, location_hint, region, use_search_fallback):
     r["fit_score"] = fit
     return r
 
-def enrich_rows(rows, location_hint, sector_profile, use_search_fallback, progress_label="Enriching"):
+def enrich_rows(rows, location_hint, sector_profile, contact_depth, progress_label="Enriching"):
     region = country_code_from_location(location_hint)
     out = []
     total = len(rows)
@@ -510,7 +527,7 @@ def enrich_rows(rows, location_hint, sector_profile, use_search_fallback, progre
     for i, row in enumerate(rows, start=1):
         status.write(f"{progress_label}: {i}/{total} — {row.get('school_name','')}")
         try:
-            out.append(enrich_one(row, location_hint, region, use_search_fallback))
+            out.append(enrich_one(row, location_hint, region, contact_depth))
         except Exception as e:
             failed = dict(row)
             failed["enrichment_status"] = f"failed: {type(e).__name__}"
@@ -520,13 +537,34 @@ def enrich_rows(rows, location_hint, sector_profile, use_search_fallback, progre
     return out
 
 
-def make_download_name(kind, mode, query_label):
+def make_download_name(kind, mode, query_label, ext="csv"):
     ts = datetime.now().strftime("%Y%m%d_%H%M")
-    return f"school_discovery_{slug(mode,25)}_{slug(query_label,45)}_{kind}_{ts}.csv"
+    return f"school_discovery_{slug(mode,25)}_{slug(query_label,45)}_{kind}_{ts}.{ext}"
 
 
 def df_to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
+
+
+def df_to_excel_bytes(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="results")
+    return output.getvalue()
+
+
+def display_columns(df):
+    preferred = [
+        "school_name", "sector", "website", "best_phone", "phone_source", "phone_confidence",
+        "visible_emails", "generic_emails", "contact_confidence", "role_signals",
+        "address", "enrichment_status", "fit_score", "phone_page", "search_contact_urls",
+    ]
+    return [c for c in preferred if c in df.columns]
+
+
+def raw_display_columns(df):
+    preferred = ["school_name", "sector", "source", "website", "osm_phone", "address", "latitude", "longitude"]
+    return [c for c in preferred if c in df.columns]
 
 
 init_state()
@@ -537,7 +575,12 @@ st.caption("Free Streamlit workflow: discover candidates, enrich websites/phones
 with st.sidebar:
     sector_profile = st.selectbox("Sector profile", list(SECTOR_PROFILES.keys()), index=0)
     mode = st.radio("Discovery mode", ["Map / geolocation", "School name", "School URL"], index=0)
-    use_search_fallback = st.checkbox("Use web search fallback for missing websites/contact details", value=True)
+    contact_depth = st.radio(
+        "Contact search depth",
+        ["Fast — website only", "Standard — website + limited web fallback", "Deep — slower, broader web fallback"],
+        index=1,
+        help="Fast is best for quick testing. Standard is the default. Deep may be slow on Streamlit Cloud."
+    )
     if st.button("Clear results / cache"):
         for k in ["map_cache_key", "map_candidates", "raw_df", "enriched_df"]:
             st.session_state[k] = None
@@ -550,21 +593,21 @@ if mode == "Map / geolocation":
     max_candidates = st.number_input("Max candidates", min_value=10, max_value=500, value=100, step=10)
     query_label = f"{sector_profile} {location} {radius_km}km {max_candidates}"
     current_key = cache_key(sector_profile, location.strip().lower(), radius_km, max_candidates)
-    can_run = st.button("Run / enrich map search", type="primary")
+    can_run = st.button("Find prospects", type="primary")
     if can_run:
         st.session_state.debug_log = []
         # v18.1 fix: cached path skips discovery/geocoding visible step entirely.
         if st.session_state.map_cache_key == current_key and st.session_state.map_candidates is not None:
             rows = st.session_state.map_candidates
-            st.info(f"Using cached map candidate set: {len(rows)} candidates. Skipping geocoding/discovery and rerunning enrichment only.")
+            st.info(f"Using saved candidate list: {len(rows)} candidates. Skipping geocoding/discovery and rerunning enrichment only.")
         else:
             st.info("Map inputs changed. Geocoding and finding candidates...")
             rows = discover_map(location, radius_km, int(max_candidates), sector_profile)
             st.session_state.map_cache_key = current_key
             st.session_state.map_candidates = rows
-            st.success(f"Discovery complete: {len(rows)} candidates retained. Starting enrichment next.")
+            st.success(f"Candidate discovery complete: {len(rows)} candidates retained. Finding contact details next.")
         st.session_state.raw_df = pd.DataFrame(rows)
-        enriched = enrich_rows(rows, location, sector_profile, use_search_fallback, progress_label="Enriching cached candidates" if st.session_state.map_cache_key == current_key else "Enriching candidates")
+        enriched = enrich_rows(rows, location, sector_profile, contact_depth, progress_label="Finding contact details")
         st.session_state.enriched_df = pd.DataFrame(enriched)
         st.session_state.last_mode = "map_geolocation"
         st.session_state.last_query_label = query_label
@@ -573,10 +616,10 @@ elif mode == "School name":
     location = st.text_input("Location hint for website/phone validation", value="Cape Town, Western Cape, South Africa")
     names = st.text_area("School / organization names", height=180, placeholder="One per line")
     query_label = names.splitlines()[0] if names.strip() else "manual_names"
-    if st.button("Resolve and enrich names", type="primary"):
+    if st.button("Find contact details", type="primary"):
         rows = candidate_from_names(names, sector_profile)
         st.session_state.raw_df = pd.DataFrame(rows)
-        enriched = enrich_rows(rows, location, sector_profile, use_search_fallback)
+        enriched = enrich_rows(rows, location, sector_profile, contact_depth)
         st.session_state.enriched_df = pd.DataFrame(enriched)
         st.session_state.last_mode = "school_name"
         st.session_state.last_query_label = query_label
@@ -585,24 +628,36 @@ else:
     location = st.text_input("Location hint for phone validation", value="Cape Town, Western Cape, South Africa")
     urls = st.text_area("School / organization URLs", height=180, placeholder="One per line")
     query_label = "manual_urls"
-    if st.button("Scrape and enrich URLs", type="primary"):
+    if st.button("Scrape websites", type="primary"):
         rows = candidate_from_urls(urls, sector_profile)
         st.session_state.raw_df = pd.DataFrame(rows)
-        enriched = enrich_rows(rows, location, sector_profile, use_search_fallback)
+        enriched = enrich_rows(rows, location, sector_profile, contact_depth)
         st.session_state.enriched_df = pd.DataFrame(enriched)
         st.session_state.last_mode = "school_url"
         st.session_state.last_query_label = query_label
 
 if st.session_state.raw_df is not None:
-    st.subheader("Raw candidates")
-    st.dataframe(st.session_state.raw_df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "Download raw candidates CSV",
-        data=df_to_csv_bytes(st.session_state.raw_df),
-        file_name=make_download_name("raw", st.session_state.last_mode or mode, st.session_state.last_query_label),
-        mime="text/csv",
-        key="download_raw",
-    )
+    st.subheader("Candidate list")
+    raw_df = st.session_state.raw_df
+    raw_cols = raw_display_columns(raw_df)
+    st.dataframe(raw_df[raw_cols] if raw_cols else raw_df, use_container_width=True, hide_index=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "Download candidate CSV",
+            data=df_to_csv_bytes(raw_df),
+            file_name=make_download_name("candidates", st.session_state.last_mode or mode, st.session_state.last_query_label, "csv"),
+            mime="text/csv",
+            key="download_raw_csv",
+        )
+    with c2:
+        st.download_button(
+            "Download candidate Excel",
+            data=df_to_excel_bytes(raw_df),
+            file_name=make_download_name("candidates", st.session_state.last_mode or mode, st.session_state.last_query_label, "xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_raw_xlsx",
+        )
 
 if st.session_state.enriched_df is not None:
     st.subheader("Enriched results")
@@ -614,17 +669,28 @@ if st.session_state.enriched_df is not None:
     metrics[3].metric("Phones", int(df.get("best_phone", pd.Series(dtype=str)).fillna("").astype(bool).sum()) if "best_phone" in df else 0)
     metrics[4].metric("Search phones", int(df.get("search_phone", pd.Series(dtype=str)).fillna("").astype(bool).sum()) if "search_phone" in df else 0)
     metrics[5].metric("Search fallback runs", int((df.get("search_fallback_executed", pd.Series(dtype=str)).fillna("") == "yes").sum()) if "search_fallback_executed" in df else 0)
-    with st.expander("Enrichment diagnostics"):
-        diag_cols = [c for c in ["school_name", "enrichment_status", "website", "original_website", "scrape_pages_attempted", "scrape_pages_successful", "search_fallback_executed", "search_queries_run", "search_result_urls_checked", "search_found_emails_count", "search_found_phones_count", "search_errors"] if c in df.columns]
+    main_cols = display_columns(df)
+    st.dataframe(df[main_cols] if main_cols else df, use_container_width=True, hide_index=True)
+    with st.expander("Diagnostics and extra fields"):
+        diag_cols = [c for c in ["school_name", "enrichment_status", "website", "original_website", "website_resolution_method", "scrape_pages_attempted", "scrape_pages_successful", "search_fallback_executed", "search_queries_run", "search_result_urls_checked", "search_found_emails_count", "search_found_phones_count", "search_errors", "all_phones_found", "website_phone", "search_phone", "osm_phone_normalized"] if c in df.columns]
         st.dataframe(df[diag_cols], use_container_width=True, hide_index=True)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "Download enriched CSV",
-        data=df_to_csv_bytes(df),
-        file_name=make_download_name("enriched", st.session_state.last_mode or mode, st.session_state.last_query_label),
-        mime="text/csv",
-        key="download_enriched",
-    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button(
+            "Download enriched CSV",
+            data=df_to_csv_bytes(df),
+            file_name=make_download_name("enriched", st.session_state.last_mode or mode, st.session_state.last_query_label, "csv"),
+            mime="text/csv",
+            key="download_enriched_csv",
+        )
+    with c2:
+        st.download_button(
+            "Download enriched Excel",
+            data=df_to_excel_bytes(df),
+            file_name=make_download_name("enriched", st.session_state.last_mode or mode, st.session_state.last_query_label, "xlsx"),
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_enriched_xlsx",
+        )
 
 with st.expander("Debug log"):
     st.code("\n".join(st.session_state.debug_log[-200:]) or "No debug log yet.")
