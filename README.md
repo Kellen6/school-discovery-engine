@@ -1,20 +1,15 @@
-# School Discovery Engine v21.1
+# Prospect Discovery Engine v22
 
-A Streamlit app for finding and enriching school prospects.
+Streamlit app for discovering and enriching prospects.
 
-## Run locally
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-streamlit run app.py
-```
+## Key fixes in v22
+- Candidate discovery cache and enrichment cache are separated.
+- Fast / Standard / Deep modes now have distinct behavior.
+- Stronger website resolution for map records without websites.
+- Website resolver searches for official sites before scraping.
+- One Prospects table and one export area.
+- CSV and Excel export.
+- Diagnostics include timings and debug logs.
 
 ## Streamlit Cloud
-Upload `app.py`, `requirements.txt`, and this README to GitHub and deploy with main file `app.py`.
-
-## Notes
-- Fast mode is designed for speed and stability.
-- Standard/Deep modes add more web search/contact lookups and can be slower.
-- Results are cached for map searches unless map inputs change.
+Upload `app.py`, `requirements.txt`, and this README to your GitHub repo, then reboot the app.
