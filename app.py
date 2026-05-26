@@ -10,8 +10,8 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-APP_VERSION = "v27"
-USER_AGENT = "ProspectDiscoveryEngine/27.0 (+https://streamlit.app; dynamic prospect profiles)"
+APP_VERSION = "v27.1"
+USER_AGENT = "ProspectDiscoveryEngine/27.1 (+https://streamlit.app; dynamic prospect profiles)"
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -79,6 +79,14 @@ META_PROFILES = {
         "osm_amenities": ["office"],
         "reject_keywords": ["job", "jobs", "course", "training", "directory"]
     },
+    "food": {
+        "triggers": ["pizza", "pizzeria", "restaurant", "takeaway", "takeout", "burger", "sushi", "bakery", "cafe", "coffee", "catering", "food"],
+        "page_paths": ["", "contact", "contact-us", "locations", "location", "menu", "about", "order", "bookings", "reservations"],
+        "roles": ["owner", "manager", "restaurant manager", "branch manager", "reception", "orders"],
+        "org_terms": ["restaurant", "takeaway", "takeout", "shop", "kitchen", "cafe"],
+        "osm_amenities": ["restaurant", "fast_food", "cafe"],
+        "reject_keywords": ["recipe", "recipes", "job", "jobs", "delivery app", "ubereats", "mr d", "directory", "top 10", "best of"]
+    },
     "general": {
         "triggers": [],
         "page_paths": ["", "contact", "contact-us", "about", "about-us", "team", "services", "locations"],
@@ -90,6 +98,9 @@ META_PROFILES = {
 }
 
 ALIASES = {
+    "pizza": ["pizzeria", "pizza restaurant", "pizza takeaway", "pizza shop", "italian restaurant"],
+    "pizzas": ["pizzeria", "pizza restaurant", "pizza takeaway", "pizza shop", "italian restaurant"],
+    "pizzeria": ["pizza restaurant", "pizza takeaway", "pizza shop", "italian restaurant"],
     "physical therapist": ["physiotherapist", "physio", "physical therapy", "physiotherapy", "rehabilitation", "sports physio"],
     "physical therapists": ["physiotherapist", "physio", "physical therapy", "physiotherapy", "rehabilitation", "sports physio"],
     "physiotherapist": ["physical therapist", "physio", "physiotherapy", "physical therapy", "rehabilitation"],
@@ -178,6 +189,7 @@ def build_dynamic_profile(query):
         "roles": cfg.get("roles", []),
         "meta_category": meta,
         "osm_amenities": cfg.get("osm_amenities", []),
+        "osm_name_terms": terms[:6],
         "generated_from": query,
     }
     return profile
@@ -744,13 +756,33 @@ def nominatim_search(query, sector, limit=50):
 def overpass_search(lat, lon, radius_m, sector, limit):
     profile = SECTOR_PROFILES.get(sector, SECTOR_PROFILES["General Organizations"])
     amenities = profile.get("osm_amenities") or (["school", "college", "university"] if sector in ["Schools", "Universities / Colleges"] else [])
+    clauses = []
     if amenities:
         amenity_re = "|".join([re.escape(a) for a in amenities])
-        keys = [f'node["amenity"~"{amenity_re}"]', f'way["amenity"~"{amenity_re}"]', f'relation["amenity"~"{amenity_re}"]']
-    else:
-        # For dynamic sectors without an OSM amenity mapping, skip Overpass and rely on Nominatim text search.
+        for obj in ["node", "way", "relation"]:
+            clauses.append(f'{obj}["amenity"~"{amenity_re}"](around:{radius_m},{lat},{lon});')
+    # Dynamic custom searches: add name/brand/cuisine text matches so generic terms like
+    # “pizza” do not return zero results just because there is no exact amenity value.
+    name_terms = profile.get("osm_name_terms", []) if sector == "Custom" else []
+    if name_terms:
+        compact_terms = []
+        for term in name_terms:
+            t = safe_str(term).lower().strip()
+            if len(t) >= 3 and t not in compact_terms:
+                compact_terms.append(t)
+        # Limit regex complexity for Overpass reliability.
+        term_re = "|".join([re.escape(t) for t in compact_terms[:8]])
+        if term_re:
+            for obj in ["node", "way", "relation"]:
+                clauses.append(f'{obj}["name"~"{term_re}",i](around:{radius_m},{lat},{lon});')
+                clauses.append(f'{obj}["brand"~"{term_re}",i](around:{radius_m},{lat},{lon});')
+            # Food-specific support, e.g. pizza/pizzeria searches.
+            if any(t in term_re for t in ["pizza", "pizzeria", "italian"]):
+                for obj in ["node", "way", "relation"]:
+                    clauses.append(f'{obj}["cuisine"~"pizza|italian",i](around:{radius_m},{lat},{lon});')
+    if not clauses:
         return []
-    q = f"""[out:json][timeout:25];({''.join([k + f'(around:{radius_m},{lat},{lon});' for k in keys])});out center tags {limit};"""
+    q = f"""[out:json][timeout:25];({''.join(clauses)});out center tags {max(limit * 3, 100)};"""
     endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.osm.ch/api/interpreter"]
     for ep in endpoints:
         try:
@@ -763,16 +795,17 @@ def overpass_search(lat, lon, radius_m, sector, limit):
             rows = []
             for e in elems:
                 tags = e.get("tags") or {}
-                name = tags.get("name") or tags.get("official_name") or ""
+                name = tags.get("name") or tags.get("official_name") or tags.get("brand") or ""
                 if not name:
                     continue
                 lat2 = e.get("lat") or (e.get("center") or {}).get("lat")
                 lon2 = e.get("lon") or (e.get("center") or {}).get("lon")
+                address = ", ".join([safe_str(tags.get(k)) for k in ["addr:housenumber", "addr:street", "addr:city"] if safe_str(tags.get(k))])
                 rows.append({
                     "prospect_name": name,
                     "sector": sector,
                     "source": "overpass",
-                    "address": ", ".join([safe_str(tags.get(k)) for k in ["addr:housenumber", "addr:street", "addr:city"] if safe_str(tags.get(k))]),
+                    "address": address,
                     "city": tags.get("addr:city", ""),
                     "country": tags.get("addr:country", ""),
                     "latitude": lat2,
@@ -832,7 +865,11 @@ def discover_map(location, radius_km, max_candidates, sector):
     for qterm in profile["queries"]:
         if len(dedupe_rows(rows, sector, max_candidates)) >= max_candidates:
             break
+        # Try both forms; Nominatim handles some categories better as "X in Y" and
+        # others better as "X Y".
         rows += nominatim_search(f"{qterm} in {location}", sector, limit=max_candidates)
+        if sector == "Custom" and len(dedupe_rows(rows, sector, max_candidates)) < max_candidates:
+            rows += nominatim_search(f"{qterm} {location}", sector, limit=max_candidates)
     return dedupe_rows(rows, sector, max_candidates)
 
 # ---------------- Pipeline ----------------
