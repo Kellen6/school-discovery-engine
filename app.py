@@ -12,8 +12,8 @@ import requests
 import streamlit as st
 from bs4 import BeautifulSoup
 
-APP_VERSION = "v18.1"
-UA = "SchoolDiscoveryEngine/18.1 contact: personal-research"
+APP_VERSION = "v19"
+UA = "SchoolDiscoveryEngine/19 contact: personal-research"
 TIMEOUT = 12
 
 SECTOR_PROFILES = {
@@ -321,76 +321,158 @@ def target_pages(homepage, sector_profile):
 
 
 def search_contact_fallback(name, location_hint, region):
+    """Search web for contacts/phones when the official website is missing or incomplete.
+    Returns emails, phones, source urls, and diagnostics.
+    """
     emails, phones, urls = set(), set(), []
+    diagnostics = {
+        "search_fallback_executed": "yes",
+        "search_queries_run": 0,
+        "search_result_urls_checked": 0,
+        "search_errors": [],
+    }
+    if not name:
+        diagnostics["search_fallback_executed"] = "no_name"
+        return [], [], [], diagnostics
+
+    # Broader contact-intent queries. Keep bounded so Streamlit Cloud does not hang.
+    loc = location_hint or ""
     queries = [
-        f'"{name}" "phone"', f'"{name}" "contact"', f'"{name}" "admissions"',
-        f'"{name}" "office"', f'"{name}" "reception"', f'"{name}" "principal"',
-        f'"{name}" "{location_hint}" "+"',
+        f'"{name}" "phone"',
+        f'"{name}" "contact"',
+        f'"{name}" "admissions"',
+        f'"{name}" "office"',
+        f'"{name}" "reception"',
+        f'"{name}" "campus"',
+        f'"{name}" "principal"',
+        f'"{name}" "staff"',
+        f'"{name}" "{loc}" "+27"' if country_code_from_location(loc) == "ZA" else f'"{name}" "{loc}" phone',
     ]
-    for q in queries[:5]:
-        for res in ddg_html_search(q, max_results=4):
+    seen_urls = set()
+    for q in queries[:7]:
+        diagnostics["search_queries_run"] += 1
+        try:
+            results = ddg_html_search(q, max_results=4)
+        except Exception as e:
+            diagnostics["search_errors"].append(f"{q}: {type(e).__name__}")
+            results = []
+        for res in results:
             u = res.get("url", "")
-            if not u.startswith("http"):
+            if not u.startswith("http") or u in seen_urls:
                 continue
+            seen_urls.add(u)
             urls.append(u)
+            diagnostics["search_result_urls_checked"] += 1
+            # Search snippets/titles sometimes contain email/phone, so inspect them too.
+            snippet_text = " ".join([res.get("title", ""), res.get("url", "")])
+            emails.update(extract_emails(snippet_text))
+            phones.update(extract_phones(snippet_text, region))
             text, _ = scrape_page(u)
             if text:
                 emails.update(extract_emails(text))
                 phones.update(extract_phones(text, region))
-            if len(phones) >= 3 and len(emails) >= 2:
+            if len(phones) >= 4 and len(emails) >= 3:
                 break
-    return sorted(emails), sorted(phones), sorted(set(urls))[:5]
+        if len(phones) >= 4 and len(emails) >= 3:
+            break
 
+    diagnostics["search_found_emails_count"] = len(emails)
+    diagnostics["search_found_phones_count"] = len(phones)
+    diagnostics["search_errors"] = "; ".join(diagnostics["search_errors"][:5])
+    return sorted(emails), sorted(phones), sorted(set(urls))[:8], diagnostics
 
 def enrich_one(row, location_hint, region, use_search_fallback):
     r = dict(row)
-    name = r.get("school_name", "")
-    if not r.get("website"):
+    name = str(r.get("school_name", "") or "")
+    original_website = str(r.get("website", "") or "").strip()
+    r["original_website"] = original_website
+
+    # Preserve discovered website. Resolution is only allowed to fill blanks, never erase a source website.
+    if not original_website:
         site, method = resolve_website_for_name(name, location_hint)
-        r["website"] = site
+        r["website"] = site or ""
         r["website_resolution_method"] = method
     else:
-        r["website_resolution_method"] = "source"
+        r["website"] = original_website
+        r["website_resolution_method"] = "source_preserved"
 
     emails, website_phones, pages = set(), set(), []
     role_hits = set()
+    scrape_pages_attempted = 0
+    scrape_pages_successful = 0
+    scrape_failure_reason = ""
+
     if r.get("website"):
-        for p in target_pages(r["website"], r.get("sector", "Schools")):
+        candidate_pages = target_pages(r["website"], r.get("sector", "Schools"))
+        for p in candidate_pages:
+            scrape_pages_attempted += 1
             text, _ = scrape_page(p)
             if not text:
+                scrape_failure_reason = "empty_or_blocked_pages"
                 continue
+            scrape_pages_successful += 1
             pages.append(p)
             emails.update(extract_emails(text))
             website_phones.update(extract_phones(text, region))
             low = text.lower()
-            for role in ["principal", "head of school", "admissions", "counsellor", "counselor", "learning support", "sen", "reception", "office"]:
+            for role in ["principal", "head of school", "admissions", "counsellor", "counselor", "learning support", "sen", "reception", "office", "campus", "staff", "leadership"]:
                 if role in low:
                     role_hits.add(role)
+        if scrape_pages_attempted and not scrape_pages_successful:
+            scrape_failure_reason = scrape_failure_reason or "all_pages_failed"
 
-    search_emails, search_phones, search_urls = [], [], []
-    if use_search_fallback and (not emails or not website_phones):
-        search_emails, search_phones, search_urls = search_contact_fallback(name, location_hint, region)
+    # Search fallback should run when the site/contact scrape is incomplete, and also after scrape failure.
+    search_emails, search_phones, search_urls, search_diag = [], [], [], {
+        "search_fallback_executed": "no",
+        "search_queries_run": 0,
+        "search_result_urls_checked": 0,
+        "search_found_emails_count": 0,
+        "search_found_phones_count": 0,
+        "search_errors": "",
+    }
+    if use_search_fallback and (not emails or not website_phones or not r.get("website") or (scrape_pages_attempted and not scrape_pages_successful)):
+        search_emails, search_phones, search_urls, search_diag = search_contact_fallback(name, location_hint, region)
         emails.update(search_emails)
 
+    # Explicit merge hierarchy: website > search/directory > OSM.
     osm_phones = extract_phones(r.get("osm_phone", ""), region)
-    all_phones = list(dict.fromkeys(list(website_phones) + list(search_phones) + osm_phones))
-    best_phone = all_phones[0] if all_phones else ""
-    if website_phones:
+    website_phone_list = sorted(website_phones)
+    search_phone_list = sorted(search_phones)
+    osm_phone_list = sorted(osm_phones)
+    all_phones = list(dict.fromkeys(website_phone_list + search_phone_list + osm_phone_list))
+    best_phone = ""
+    phone_source, phone_conf = "", ""
+    if website_phone_list:
+        best_phone = website_phone_list[0]
         phone_source, phone_conf = "website", "high"
-    elif search_phones:
+    elif search_phone_list:
+        best_phone = search_phone_list[0]
         phone_source, phone_conf = "search", "medium"
-    elif osm_phones:
+    elif osm_phone_list:
+        best_phone = osm_phone_list[0]
         phone_source, phone_conf = "osm", "medium"
-    else:
-        phone_source, phone_conf = "", ""
 
-    generic_emails = [e for e in emails if re.match(r"^(info|admin|office|admissions|contact|reception)@", e.lower())]
+    sorted_emails = sorted(emails)
+    generic_emails = [e for e in sorted_emails if re.match(r"^(info|admin|office|admissions|contact|reception|hello|enquiries|enquiry)@", e.lower())]
+    search_email_only = sorted(set(search_emails))
+
+    if r.get("website") and scrape_pages_successful:
+        base_status = "scraped"
+    elif r.get("website") and scrape_pages_attempted and not scrape_pages_successful:
+        base_status = "scrape_failed_search_attempted" if use_search_fallback else "scrape_failed"
+    elif not r.get("website"):
+        base_status = "no_website_search_attempted" if use_search_fallback else "no_website"
+    else:
+        base_status = "not_enriched"
+
     r.update({
-        "visible_emails": "; ".join(sorted(emails)),
+        "visible_emails": "; ".join(sorted_emails),
         "generic_emails": "; ".join(generic_emails),
-        "website_phone": "; ".join(sorted(website_phones)),
-        "search_phone": "; ".join(sorted(search_phones)),
-        "osm_phone_normalized": "; ".join(osm_phones),
+        "search_emails": "; ".join(search_email_only),
+        "website_phone": "; ".join(website_phone_list),
+        "search_phone": "; ".join(search_phone_list),
+        "directory_phone": "; ".join(search_phone_list),
+        "osm_phone_normalized": "; ".join(osm_phone_list),
         "best_phone": best_phone,
         "phone_source": phone_source,
         "phone_confidence": phone_conf,
@@ -398,9 +480,19 @@ def enrich_one(row, location_hint, region, use_search_fallback):
         "phone_page": pages[0] if pages else (search_urls[0] if search_urls else ""),
         "search_contact_urls": "; ".join(search_urls),
         "role_signals": "; ".join(sorted(role_hits)),
-        "contact_confidence": "high" if emails and best_phone else ("medium" if emails or best_phone else "low"),
-        "enrichment_status": "enriched" if (emails or best_phone or r.get("website")) else "no_contact_found",
+        "contact_confidence": "high" if sorted_emails and best_phone else ("medium" if sorted_emails or best_phone else "low"),
+        "enrichment_status": base_status,
+        "scrape_pages_attempted": scrape_pages_attempted,
+        "scrape_pages_successful": scrape_pages_successful,
+        "scrape_failure_reason": scrape_failure_reason,
+        "search_fallback_executed": search_diag.get("search_fallback_executed", "no"),
+        "search_queries_run": search_diag.get("search_queries_run", 0),
+        "search_result_urls_checked": search_diag.get("search_result_urls_checked", 0),
+        "search_found_emails_count": search_diag.get("search_found_emails_count", 0),
+        "search_found_phones_count": search_diag.get("search_found_phones_count", 0),
+        "search_errors": search_diag.get("search_errors", ""),
     })
+
     fit = 0
     low_text = " ".join([r.get("school_name", ""), r.get("role_signals", ""), r.get("visible_emails", "")]).lower()
     for kw, pts in [("admissions", 2), ("learning support", 3), ("sen", 2), ("principal", 1), ("counsel", 2), ("international", 2)]:
@@ -408,7 +500,6 @@ def enrich_one(row, location_hint, region, use_search_fallback):
             fit += pts
     r["fit_score"] = fit
     return r
-
 
 def enrich_rows(rows, location_hint, sector_profile, use_search_fallback, progress_label="Enriching"):
     region = country_code_from_location(location_hint)
@@ -516,12 +607,16 @@ if st.session_state.raw_df is not None:
 if st.session_state.enriched_df is not None:
     st.subheader("Enriched results")
     df = st.session_state.enriched_df
-    metrics = st.columns(5)
+    metrics = st.columns(6)
     metrics[0].metric("Rows", len(df))
     metrics[1].metric("Websites", int(df.get("website", pd.Series(dtype=str)).fillna("").astype(bool).sum()) if "website" in df else 0)
     metrics[2].metric("Emails", int(df.get("visible_emails", pd.Series(dtype=str)).fillna("").astype(bool).sum()) if "visible_emails" in df else 0)
     metrics[3].metric("Phones", int(df.get("best_phone", pd.Series(dtype=str)).fillna("").astype(bool).sum()) if "best_phone" in df else 0)
     metrics[4].metric("Search phones", int(df.get("search_phone", pd.Series(dtype=str)).fillna("").astype(bool).sum()) if "search_phone" in df else 0)
+    metrics[5].metric("Search fallback runs", int((df.get("search_fallback_executed", pd.Series(dtype=str)).fillna("") == "yes").sum()) if "search_fallback_executed" in df else 0)
+    with st.expander("Enrichment diagnostics"):
+        diag_cols = [c for c in ["school_name", "enrichment_status", "website", "original_website", "scrape_pages_attempted", "scrape_pages_successful", "search_fallback_executed", "search_queries_run", "search_result_urls_checked", "search_found_emails_count", "search_found_phones_count", "search_errors"] if c in df.columns]
+        st.dataframe(df[diag_cols], use_container_width=True, hide_index=True)
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button(
         "Download enriched CSV",

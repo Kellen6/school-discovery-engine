@@ -1,17 +1,16 @@
-# School Discovery Engine v18.1
+# Discovery & Contact Enrichment Engine v19
 
-Free Streamlit prospect discovery/enrichment app.
+Streamlit app for discovering organizations and enriching websites, emails, phones, contact pages, and diagnostics.
+
+## v19 changes
+- Preserves discovered/source websites; enrichment never overwrites a known website with blank.
+- Adds search fallback diagnostics: executed, queries run, URLs checked, phones/emails found, errors.
+- Retries scrape failures via search fallback when enabled.
+- Makes phone/email merge hierarchy explicit: website > search/directory > OSM.
+- Keeps cached map candidates when map inputs do not change.
 
 ## Run locally
 ```bash
-python3 -m venv venv
-source venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Deploy on Streamlit Community Cloud
-Upload `app.py`, `requirements.txt`, and this README to GitHub. In Streamlit Cloud, create a new app using `app.py` as the main file.
-
-## v18.1 fix
-When map/location/radius/sector inputs are unchanged, the app now skips the visible discovery/geocoding progress stage and shows only cached-candidate enrichment progress.
