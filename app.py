@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-APP_VERSION = "v16"
+APP_VERSION = "v17"
 
 DEBUG_LOG_BUFFER = []
 
@@ -48,6 +48,63 @@ ROLE_KEYWORDS = {
     "innovation_ai": ["innovation", "digital learning", "technology", "artificial intelligence", "ai policy"],
     "university_guidance": ["university guidance", "college counseling", "tertiary", "career guidance"]
 }
+
+# Sector profiles make the engine extensible beyond schools.
+# Add a new profile here to reuse the same discovery + scraping pipeline for other sectors.
+SECTOR_PROFILES = {
+    "schools": {
+        "label": "Schools / education",
+        "entity_label": "school",
+        "overpass_amenity_regex": "school|college|university|kindergarten|language_school",
+        "overpass_extra_filters": [("building", "school"), ("office", "educational_institution")],
+        "nominatim_terms": ["school", "private school", "international school", "college", "university", "academy"],
+        "contact_paths": ["contact", "contacts", "contact-us", "admissions", "admission", "enrol", "enroll", "staff", "team", "leadership", "management", "about", "learning-support", "support", "counselling", "counseling", "academics", "reception", "office"],
+        "search_terms": ["phone", "contact", "admissions", "office", "reception", "campus", "principal", "staff", "leadership"],
+    },
+    "higher_ed": {
+        "label": "Higher education",
+        "entity_label": "institution",
+        "overpass_amenity_regex": "college|university",
+        "overpass_extra_filters": [("office", "educational_institution")],
+        "nominatim_terms": ["university", "college", "higher education institution", "training college", "campus"],
+        "contact_paths": ["contact", "admissions", "registrar", "faculty", "departments", "staff", "about", "campus"],
+        "search_terms": ["phone", "contact", "admissions", "registrar", "office", "reception", "campus"],
+    },
+    "healthcare": {
+        "label": "Healthcare providers",
+        "entity_label": "provider",
+        "overpass_amenity_regex": "hospital|clinic|doctors|dentist|pharmacy",
+        "overpass_extra_filters": [("healthcare", ".*")],
+        "nominatim_terms": ["clinic", "hospital", "medical centre", "doctor", "health centre"],
+        "contact_paths": ["contact", "appointments", "services", "doctors", "team", "about", "locations"],
+        "search_terms": ["phone", "contact", "appointments", "reception", "office", "location"],
+    },
+    "ngo": {
+        "label": "NGOs / nonprofits",
+        "entity_label": "organization",
+        "overpass_amenity_regex": "community_centre|social_facility",
+        "overpass_extra_filters": [("office", "ngo"), ("office", "association")],
+        "nominatim_terms": ["NGO", "nonprofit", "charity", "foundation", "community organization"],
+        "contact_paths": ["contact", "about", "team", "staff", "leadership", "programmes", "programs", "partners"],
+        "search_terms": ["phone", "contact", "office", "director", "team", "programmes"],
+    },
+    "business": {
+        "label": "Businesses / companies",
+        "entity_label": "organization",
+        "overpass_amenity_regex": "",
+        "overpass_extra_filters": [("office", ".*"), ("shop", ".*")],
+        "nominatim_terms": ["company", "business", "office", "service provider"],
+        "contact_paths": ["contact", "about", "team", "leadership", "services", "locations"],
+        "search_terms": ["phone", "contact", "office", "sales", "reception"],
+    },
+}
+
+def get_sector_profile(sector_key):
+    return SECTOR_PROFILES.get(sector_key, SECTOR_PROFILES["schools"])
+
+def all_contact_path_hints(sector_key="schools"):
+    profile_paths = get_sector_profile(sector_key).get("contact_paths", [])
+    return list(dict.fromkeys(CONTACT_PATH_HINTS + profile_paths))
 
 EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 OBFUSCATED_EMAIL_PATTERNS = [
@@ -323,21 +380,30 @@ def geocode_location(location):
     item = r.json()[0]
     return float(item["lat"]), float(item["lon"]), item.get("display_name", location)
 
-def overpass_query(lat, lon, radius_km, max_results):
-    # Query multiple education-related tags. Uses [out:json] and data parameter.
+def overpass_query(lat, lon, radius_km, max_results, sector_key="schools"):
+    # Query sector-specific OSM tags. Uses [out:json] and data parameter.
     radius_m = int(radius_km * 1000)
+    profile = get_sector_profile(sector_key)
+    clauses = []
+    amenity_regex = profile.get("overpass_amenity_regex", "")
+    if amenity_regex:
+        clauses.extend([
+            f'node(around:{radius_m},{lat},{lon})["amenity"~"{amenity_regex}"];',
+            f'way(around:{radius_m},{lat},{lon})["amenity"~"{amenity_regex}"];',
+            f'relation(around:{radius_m},{lat},{lon})["amenity"~"{amenity_regex}"];',
+        ])
+    for key, val in profile.get("overpass_extra_filters", []):
+        op = "~" if val == ".*" else "="
+        clauses.extend([
+            f'node(around:{radius_m},{lat},{lon})["{key}"{op}"{val}"];',
+            f'way(around:{radius_m},{lat},{lon})["{key}"{op}"{val}"];',
+            f'relation(around:{radius_m},{lat},{lon})["{key}"{op}"{val}"];',
+        ])
+    clause_text = "\n      ".join(clauses) or f'node(around:{radius_m},{lat},{lon});'
     q = f"""
     [out:json][timeout:25];
     (
-      node(around:{radius_m},{lat},{lon})["amenity"~"school|college|university|kindergarten|language_school"];
-      way(around:{radius_m},{lat},{lon})["amenity"~"school|college|university|kindergarten|language_school"];
-      relation(around:{radius_m},{lat},{lon})["amenity"~"school|college|university|kindergarten|language_school"];
-      node(around:{radius_m},{lat},{lon})["building"="school"];
-      way(around:{radius_m},{lat},{lon})["building"="school"];
-      relation(around:{radius_m},{lat},{lon})["building"="school"];
-      node(around:{radius_m},{lat},{lon})["office"="educational_institution"];
-      way(around:{radius_m},{lat},{lon})["office"="educational_institution"];
-      relation(around:{radius_m},{lat},{lon})["office"="educational_institution"];
+      {clause_text}
     );
     out center tags {max_results};
     """
@@ -386,23 +452,17 @@ def overpass_query(lat, lon, radius_km, max_results):
             log(f"Overpass {ep}: {type(e).__name__}: {e}")
     return rows
 
-def discover_by_location(location, radius_km, max_results):
+def discover_by_location(location, radius_km, max_results, sector_key="schools"):
     rows = []
     geo = geocode_location(location)
     if geo:
         lat, lon, display = geo
         log(f"Geocoded to: {display} ({lat:.5f},{lon:.5f})")
-        rows.extend(overpass_query(lat, lon, radius_km, max_results))
+        rows.extend(overpass_query(lat, lon, radius_km, max_results, sector_key=sector_key))
     if not rows:
         log("Overpass returned no candidates or timed out. Trying Nominatim fallback...")
-    queries = [
-        f"school in {location}",
-        f"private school in {location}",
-        f"international school in {location}",
-        f"college in {location}",
-        f"university in {location}",
-        f"academy in {location}",
-    ]
+    profile = get_sector_profile(sector_key)
+    queries = [f"{term} in {location}" for term in profile.get("nominatim_terms", ["school"])]
     for q in queries:
         rows.extend(discover_from_nominatim(q, limit=max_results))
     return dedupe_candidates(rows)[:max_results]
@@ -616,11 +676,20 @@ def resolve_websites_for_rows(rows, location_hint="", max_workers=6):
 
 
 CONTACT_SEARCH_QUERIES = [
+    "{name} phone {location}",
+    "{name} contact {location}",
     "{name} contact email {location}",
+    "{name} admissions {location}",
     "{name} admissions email {location}",
+    "{name} office phone {location}",
+    "{name} reception phone {location}",
+    "{name} campus phone {location}",
+    "{name} principal {location}",
     "{name} principal email {location}",
-    "{name} staff email {location}",
-    "{name} learning support email {location}",
+    "{name} staff contact {location}",
+    "{name} leadership contact {location}",
+    "{name} +27 {location}",
+    "{name} 021 {location}",
 ]
 
 
@@ -674,7 +743,7 @@ def ddg_search_results(query, max_results=8):
         return []
 
 
-def search_contact_details(name, website="", location_hint="", max_pages=8):
+def search_contact_details(name, website="", location_hint="", max_pages=8, sector_key="schools"):
     """Best-effort web search fallback for contacts when website scrape is incomplete.
 
     Returns a dict containing emails, generic_emails, source_urls, text, and role signals.
@@ -685,6 +754,8 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
     queries = []
     for tmpl in CONTACT_SEARCH_QUERIES:
         queries.append(tmpl.format(name=name, location=location_hint or "" ).strip())
+    for term in get_sector_profile(sector_key).get("search_terms", []):
+        queries.append(f"{name} {term} {location_hint or ''}".strip())
     if domain:
         queries.extend([
             f"site:{domain} contact email",
@@ -798,7 +869,7 @@ def search_contact_details(name, website="", location_hint="", max_pages=8):
         "search_confidence": min(confidence, 85),
     }
 
-def pages_to_scrape(home_url, max_pages=4):
+def pages_to_scrape(home_url, max_pages=8, sector_key="schools"):
     urls = [normalize_url(home_url)]
     r = safe_get(home_url, timeout=TIMEOUT)
     if isinstance(r, Exception) or getattr(r, "status_code", 999) >= 400:
@@ -811,8 +882,9 @@ def pages_to_scrape(home_url, max_pages=4):
             continue
         path = urllib.parse.urlparse(link).path.lower()
         blob = f"{path} {text}".lower()
-        if any(h in blob for h in CONTACT_PATH_HINTS):
-            scored.append((link, sum(1 for h in CONTACT_PATH_HINTS if h in blob)))
+        hints = all_contact_path_hints(sector_key)
+        if any(h in blob for h in hints):
+            scored.append((link, sum(1 for h in hints if h in blob)))
     scored = sorted(scored, key=lambda x: x[1], reverse=True)
     for link, _ in scored:
         if link not in urls:
@@ -821,7 +893,7 @@ def pages_to_scrape(home_url, max_pages=4):
             break
     # Add guessed pages
     root = f"{urllib.parse.urlparse(home_url).scheme}://{urllib.parse.urlparse(home_url).netloc}"
-    for p in ["contact", "contact-us", "admissions", "staff", "team", "leadership", "about"]:
+    for p in all_contact_path_hints(sector_key)[:16]:
         u = f"{root}/{p}"
         if u not in urls:
             urls.append(u)
@@ -864,7 +936,7 @@ def fit_score(roles, text):
     if any(k in low for k in ["parent", "workshop", "webinar"]): score += 1
     return score
 
-def scrape_school(row, location_hint="", use_contact_search=True, contact_search_pages=3):
+def scrape_school(row, location_hint="", use_contact_search=True, contact_search_pages=3, sector_key="schools"):
     website = normalize_url(row.get("website", ""))
     result = dict(row)
     result.update({
@@ -904,7 +976,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
     roles = {}
 
     if website and not is_directory_url(website):
-        for u in pages_to_scrape(website):
+        for u in pages_to_scrape(website, sector_key=sector_key):
             r = safe_get(u, timeout=TIMEOUT)
             if isinstance(r, Exception):
                 continue
@@ -949,6 +1021,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
             website=website,
             location_hint=location_hint,
             max_pages=contact_search_pages,
+            sector_key=sector_key,
         )
         if search["search_emails"]:
             contact_source = "search_result" if not emails else "website + search_result"
@@ -1013,7 +1086,7 @@ def scrape_school(row, location_hint="", use_contact_search=True, contact_search
     })
     return result
 
-def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use_contact_search=True, contact_search_pages=3, max_enrich_rows=None):
+def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use_contact_search=True, contact_search_pages=3, max_enrich_rows=None, sector_key="schools", progress_callback=None):
     """Enrich rows. By default enriches all rows. If max_enrich_rows is set, retains skipped rows with clear status."""
     total = len(rows)
     limit = total if max_enrich_rows in (None, 0, "", "All") else min(int(max_enrich_rows), total)
@@ -1024,12 +1097,20 @@ def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=4, use
     results = []
     if rows_to_process:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(scrape_school, r, location_hint, use_contact_search, contact_search_pages) for r in rows_to_process]
+            futures = [ex.submit(scrape_school, r, location_hint, use_contact_search, contact_search_pages, sector_key) for r in rows_to_process]
+            completed = 0
+            total_futures = len(futures)
             for fut in as_completed(futures):
                 try:
                     results.append(fut.result())
                 except Exception as e:
                     log(f"Scrape worker failed: {type(e).__name__}: {e}")
+                completed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(completed, total_futures)
+                    except Exception:
+                        pass
     for r in skipped_rows:
         rr = dict(r)
         rr.setdefault("scrape_status", "not_enriched_by_user_limit")
@@ -1111,10 +1192,13 @@ def clear_results():
 init_state()
 
 st.title("School Discovery Engine")
-st.caption(f"Free workflow build {APP_VERSION}: discover schools, resolve websites, scrape contacts/phones with country-aware validation, and export for outreach.")
+st.caption(f"Free workflow build {APP_VERSION}: sector-ready discovery, website/contact scraping, country-aware phone validation, progress tracking, and export for outreach.")
 
 with st.sidebar:
     st.header("Settings")
+    sector_options = {v["label"]: k for k, v in SECTOR_PROFILES.items()}
+    selected_sector_label = st.selectbox("Sector profile", list(sector_options.keys()), index=0, help="Schools are optimized now. Other profiles are early templates for extending the engine to healthcare, NGOs, higher ed, and businesses.")
+    sector_key = sector_options[selected_sector_label]
     resolve_missing = st.checkbox("Try to resolve missing websites", value=True, help="Uses best-effort free search and domain guessing. Not guaranteed.")
     scrape_after = st.checkbox("Scrape contacts after discovery", value=True)
     use_contact_search = st.checkbox("Use web search fallback for missing contacts", value=False, help="Slower. If website scraping finds no useful emails/contacts, search the web for contact/admissions/principal details and mark them as search-derived.")
@@ -1131,7 +1215,7 @@ with st.sidebar:
 
 mode = st.radio(
     "Choose one discovery mode",
-    ["1. Map / geolocation", "2. School name", "3. School URL", "4. Source/list page"],
+    ["1. Map / geolocation", "2. Entity name", "3. Entity URL", "4. Source/list page"],
     horizontal=True,
 )
 
@@ -1140,22 +1224,24 @@ with st.form("discovery_form"):
         location = st.text_input("Location", value="Cape Town, Western Cape, South Africa")
         radius = st.slider("Radius (km)", 1, 100, 10)
         max_results = st.slider("Max candidates", 10, 300, 100)
-        submitted = st.form_submit_button("Find schools")
+        submitted = st.form_submit_button("Find candidates")
     elif mode.startswith("2"):
         location = st.text_input("Optional location hint", value="Cape Town, South Africa")
-        names_text = st.text_area("School names, one per line", height=180, placeholder="Lycée Français du Cap\nCape Town High School\n...")
+        names_text = st.text_area("Entity names, one per line", height=180, placeholder="Lycée Français du Cap\nCape Town High School\n...")
         max_results = st.slider("Max candidates", 10, 300, 100)
         submitted = st.form_submit_button("Resolve names")
     elif mode.startswith("3"):
-        urls_text = st.text_area("School URLs, one per line", height=180, placeholder="https://example-school.org\nhttps://another-school.co.za")
+        urls_text = st.text_area("Entity URLs, one per line", height=180, placeholder="https://example-school.org\nhttps://another-school.co.za")
         submitted = st.form_submit_button("Scrape URLs")
     else:
         source_urls_text = st.text_area("Source/list page URLs, one per line", height=180, placeholder="https://example.com/best-schools-cape-town")
-        max_results = st.slider("Max extracted school links", 10, 300, 100)
-        submitted = st.form_submit_button("Extract school links")
+        max_results = st.slider("Max extracted links", 10, 300, 100)
+        submitted = st.form_submit_button("Extract links")
 
 if submitted:
-    st.session_state.last_mode = mode
+    progress_bar = st.progress(0, text="Starting run...")
+    status_box = st.empty()
+    st.session_state.last_mode = f"{mode} - {selected_sector_label}"
     if mode.startswith("1"):
         st.session_state.last_query_label = locals().get("location", "map")
     elif mode.startswith("2"):
@@ -1167,8 +1253,9 @@ if submitted:
     st.session_state.debug_log = []
     DEBUG_LOG_BUFFER.clear()
     with st.spinner("Running discovery..."):
+        progress_bar.progress(5, text="Geocoding / finding candidates...")
         if mode.startswith("1"):
-            rows = discover_by_location(location, radius, max_results)
+            rows = discover_by_location(location, radius, max_results, sector_key=sector_key)
             if resolve_missing:
                 rows = resolve_websites_for_rows(rows[:max_resolve_rows], location_hint=location, max_workers=max_workers) + rows[max_resolve_rows:]
         elif mode.startswith("2"):
@@ -1184,15 +1271,24 @@ if submitted:
                 rows = resolve_websites_for_rows(rows[:max_resolve_rows], max_workers=max_workers) + rows[max_resolve_rows:]
         raw_df = pd.DataFrame(rows)
         st.session_state.raw_candidates = raw_df
+        progress_bar.progress(30, text=f"Discovery complete: {len(rows)} candidates retained.")
+        status_box.info(f"Discovery complete: {len(rows)} candidates retained. Starting enrichment next." if rows else "No candidates found.")
         log(f"Raw candidates retained: {len(rows)}. Enrichment mode: {'all rows' if max_enrich_rows in (None, 0, '') else str(max_enrich_rows) + ' row limit'}.")
     if not rows:
         st.warning("No candidates found. Try School name or School URL mode, or paste a source/list page.")
     elif scrape_after:
         with st.spinner("Scraping websites and contacts..."):
-            enriched = enrich_rows(rows, resolve_missing=False, location_hint=(locals().get("location") or ""), max_workers=max_workers, use_contact_search=use_contact_search, contact_search_pages=contact_search_pages, max_enrich_rows=max_enrich_rows)
+            def _progress(done, total):
+                pct = 30 + int(68 * (done / max(total, 1)))
+                progress_bar.progress(min(pct, 98), text=f"Enriching contacts: {done}/{total} completed...")
+            enriched = enrich_rows(rows, resolve_missing=False, location_hint=(locals().get("location") or ""), max_workers=max_workers, use_contact_search=use_contact_search, contact_search_pages=contact_search_pages, max_enrich_rows=max_enrich_rows, sector_key=sector_key, progress_callback=_progress)
             st.session_state.enriched_results = pd.DataFrame(enriched)
+            progress_bar.progress(100, text="Run complete.")
+            status_box.success(f"Run complete: {len(st.session_state.enriched_results)} rows enriched/export-ready.")
     else:
         st.session_state.enriched_results = raw_df.copy()
+        progress_bar.progress(100, text="Run complete.")
+        status_box.success(f"Run complete: {len(raw_df)} raw candidates ready for export.")
 
 show_results()
 

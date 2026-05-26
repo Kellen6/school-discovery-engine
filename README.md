@@ -1,46 +1,52 @@
-# School Discovery Engine v16
+# School Discovery Engine v17
 
-Free Streamlit app for discovering schools, resolving websites, scraping contact details, and exporting outreach-ready CSV/Excel files.
+Free Streamlit workflow for discovering and enriching outreach prospects.
 
-## v16 changes
+## What's new in v17
 
-- Defaults to **enrich all discovered rows** instead of silently capping enrichment.
-- Optional enrichment limit is still available for very large runs on Streamlit Cloud.
+- Stronger phone/contact enrichment:
+  - website footer/contact/admissions/staff/leadership pages
+  - search fallback queries for phone, contact, admissions, office, reception, campus, principal, and staff
+  - separate phone columns: `osm_phone`, `website_phone`, `search_phone`, `directory_phone`, `best_phone`, `phone_source`, `phone_confidence`, `all_phones_found`
 - Country-aware phone validation using `phonenumbers`.
-- Phone extraction now matches the inferred country from the search/location hint, instead of assuming South Africa only.
-- Better phone columns remain: `osm_phone`, `website_phone`, `search_phone`, `directory_phone`, `best_phone`, `phone_source`, `phone_confidence`, `all_phones_found`.
-- Download filenames include mode/query/date-time so repeated exports do not overwrite each other.
+- Progress/status bar during discovery and enrichment.
+- Download filenames include discovery mode, sector/query label, and timestamp.
+- Sector profile architecture for future expansion beyond schools:
+  - Schools / education
+  - Higher education
+  - Healthcare providers
+  - NGOs / nonprofits
+  - Businesses / companies
 
-## Run locally
+Schools are the most mature profile. Other profiles are templates that can be expanded with sector-specific search terms, map tags, contact paths, and scoring logic.
+
+## Local run
 
 ```bash
+cd school_discovery_engine_free_v17
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy on Streamlit Community Cloud
+## Streamlit Cloud
 
-Upload these files to your GitHub repo:
+Upload these files to your GitHub repo root:
 
 - `app.py`
 - `requirements.txt`
 - `README.md`
 
-Then reboot the Streamlit app.
+Then reboot the app in Streamlit Cloud.
 
-## Recommended settings
+## Suggested settings for Cape Town school runs
 
-For a normal city search:
-
-- Enrich all discovered rows: ON
-- Scraping speed: 2 or 3
-- Max missing websites to resolve: 100-150
-- Web search fallback: OFF first, ON for a second pass or smaller batches
-
-For large country/region searches:
-
-- Enrich all discovered rows: OFF
-- Optional max rows to enrich: 100-200
-- Use the raw export to preserve all discovered candidates
+- Sector profile: Schools / education
+- Mode: Map / geolocation
+- Location: Cape Town, Western Cape, South Africa
+- Radius: 10–25 km
+- Max candidates: 50–100
+- Scrape contacts after discovery: ON
+- Use web search fallback: ON for better phone/contact coverage, OFF for faster testing
+- Scraping speed: 2–3 on Streamlit Cloud
