@@ -10,7 +10,7 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-APP_VERSION = "v25"
+APP_VERSION = "v26"
 USER_AGENT = "ProspectDiscoveryEngine/25.0 (+https://streamlit.app; contact enrichment research)"
 HEADERS = {
     "User-Agent": USER_AGENT,
@@ -49,8 +49,8 @@ BAD_DOMAINS = [
     "tripadvisor", "booking.com", "property24", "gumtree", "indeed.com", "glassdoor",
 ]
 DIRECTORY_HINTS = ["schoolguide", "saschools", "snupit", "brabys", "cybo", "businesslist", "directory", "yellowpages"]
-SA_SUFFIXES = [".co.za", ".org.za", ".ac.za", ".school.za", ".edu.za"]
-DEFAULT_SUFFIXES = [".org", ".com", ".edu"]
+SA_SUFFIXES = [".co.za", ".org.za", ".ac.za", ".school.za", ".edu.za", ".com", ".org", ".net"]
+DEFAULT_SUFFIXES = [".org", ".com", ".edu", ".net"]
 
 # ---------------- State / utils ----------------
 
@@ -133,6 +133,11 @@ def clean_name(s):
 def text_tokens(s):
     stop = {"the", "and", "for", "of", "at", "in", "on", "cape", "town", "south", "africa", "western", "campus", "branch"}
     return [t for t in re.sub(r"[^a-z0-9 ]", " ", safe_str(s).lower()).split() if len(t) > 1 and t not in stop]
+def raw_tokens(s):
+    """Tokens with minimal stopword removal, used for acronyms like CCT / HIC."""
+    stop = {"the", "and", "for", "of", "at", "in", "on"}
+    return [t for t in re.sub(r"[^a-z0-9 ]", " ", safe_str(s).lower()).split() if len(t) > 1 and t not in stop]
+
 
 def important_tokens(name):
     sector_words = {"school", "primary", "high", "college", "academy", "independent", "secondary", "pre", "prep", "preparatory", "campus", "learners"}
@@ -229,57 +234,78 @@ def name_variants(name):
     variants = []
     def add(x):
         x = clean_name(x)
+        x = re.sub(r"\s+", " ", x).strip(" -–:,")
         if x and x.lower() not in [v.lower() for v in variants]:
             variants.append(x)
     add(name)
     add(re.sub(r"\([^)]*\)", "", name))
-    # Parent campus handling
-    campus_patterns = [
-        r"\s*[-–:]?\s*\b[A-Za-z ]*Campus\b.*$",
-        r"\s*\b\w+\s+Campus\b.*$",
-        r"\s*\bPre[- ]?Prep\b.*$",
-        r"\s*\bPreparatory\b.*$",
-        r"\s*\bPrimary School\b.*$" if "College" in name else r"$^",
-    ]
-    for pat in campus_patterns:
-        try:
-            add(re.sub(pat, "", name, flags=re.I))
-        except Exception:
-            pass
-    # Strip sector words as a weak variant for domain guessing only
-    toks = important_tokens(name)
-    if toks:
-        add(" ".join(toks))
-    return [v for v in variants if len(v) >= 3]
 
+    # Parent/campus handling: strip campus/branch qualifiers but preserve parent institution.
+    parent = re.sub(r"\s*[-–:]?\s*\b[A-Za-z ]*Campus\b.*$", "", name, flags=re.I)
+    add(parent)
+    parent = re.sub(r"\s*\b(Pre[- ]?Prep|Pre[- ]?Primary|Preparatory|Junior School|Primary School)\b.*$", "", name, flags=re.I)
+    add(parent)
+
+    # Common abbreviated parent form for institutions like College of Cape Town / Hidayatul Islam College.
+    toks_raw = raw_tokens(name)
+    if len(toks_raw) >= 2:
+        add(" ".join(toks_raw[:2]))
+    if len(toks_raw) >= 3:
+        add(" ".join(toks_raw[:3]))
+
+    toks_imp = important_tokens(name)
+    if toks_imp:
+        add(" ".join(toks_imp))
+        if len(toks_imp) >= 2:
+            add(" ".join(toks_imp[:2]))
+    return [v for v in variants if len(v) >= 3]
 def domain_guesses(name, country):
     guesses = []
-    suffixes = SA_SUFFIXES if safe_str(country).lower() == "south africa" else DEFAULT_SUFFIXES
-    for variant in name_variants(name)[:4]:
+    suffixes = SA_SUFFIXES if safe_str(country).lower() in {"south africa", "za"} else DEFAULT_SUFFIXES
+    for variant in name_variants(name)[:6]:
         toks_all = text_tokens(variant)
-        toks_imp = important_tokens(variant) or toks_all
+        toks_raw = raw_tokens(variant)
+        toks_imp = important_tokens(variant) or toks_all or toks_raw
         base_options = []
-        if toks_imp:
-            base_options += ["".join(toks_imp), "-".join(toks_imp)]
-            ac = acronym(toks_imp)
-            if 2 <= len(ac) <= 6:
-                base_options.append(ac)
-        if toks_all and toks_all != toks_imp:
-            base_options.append("".join(toks_all))
+
+        def add_base(x):
+            x = re.sub(r"[^a-z0-9-]", "", safe_str(x).lower())
+            if 2 <= len(x) <= 45 and x not in base_options:
+                base_options.append(x)
+
+        # Full compact and hyphenated names.
+        for toks in [toks_imp, toks_all, toks_raw]:
+            if toks:
+                add_base("".join(toks))
+                add_base("-".join(toks))
+                ac = acronym(toks)
+                if 2 <= len(ac) <= 8:
+                    add_base(ac)
+
+        # First-token/first-two-token school variants catch alphaschool.org.za, oudemolen.org.za, etc.
+        if toks_raw:
+            add_base(toks_raw[0])
+            if "school" in toks_raw:
+                add_base(toks_raw[0] + "school")
+            if "college" in toks_raw:
+                add_base(toks_raw[0] + "college")
+            if len(toks_raw) >= 2:
+                add_base("".join(toks_raw[:2]))
+                add_base("-".join(toks_raw[:2]))
+            if len(toks_raw) >= 3:
+                add_base("".join(toks_raw[:3]))
+                add_base("-".join(toks_raw[:3]))
+
         for b in base_options:
-            b = re.sub(r"[^a-z0-9-]", "", b.lower())
-            if len(b) < 2: continue
             for suf in suffixes:
                 guesses.append(f"https://www.{b}{suf}")
                 guesses.append(f"https://{b}{suf}")
-    # dedupe
     out, seen = [], set()
     for g in guesses:
         d = get_domain(g)
         if d and d not in seen:
             seen.add(d); out.append(g)
-    return out[:24]
-
+    return out[:80]
 def is_bad_result_url(url):
     d = get_domain(url)
     if not d: return True
@@ -380,6 +406,54 @@ def web_search(query, max_results=8, timeout=10):
             break
     return deduped
 
+def get_optional_secret(name):
+    try:
+        v = st.secrets.get(name, "")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    try:
+        import os
+        return os.environ.get(name, "") or ""
+    except Exception:
+        return ""
+
+def google_places_lookup(name, location_hint):
+    """Optional paid/API-backed resolver. If GOOGLE_PLACES_API_KEY is absent, does nothing."""
+    key = get_optional_secret("GOOGLE_PLACES_API_KEY")
+    if not key:
+        return None
+    query = f"{name} {location_hint}"
+    try:
+        r = requests.get(
+            "https://maps.googleapis.com/maps/api/place/textsearch/json",
+            params={"query": query, "key": key}, headers=HEADERS, timeout=10
+        )
+        data = r.json()
+        results = data.get("results") or []
+        if not results:
+            return None
+        place_id = results[0].get("place_id")
+        if not place_id:
+            return None
+        d = requests.get(
+            "https://maps.googleapis.com/maps/api/place/details/json",
+            params={"place_id": place_id, "fields": "name,website,formatted_phone_number,international_phone_number,url", "key": key},
+            headers=HEADERS, timeout=10
+        ).json().get("result") or {}
+        website = normalize_url(d.get("website", ""))
+        if not website:
+            return None
+        return {
+            "url": website,
+            "phone": d.get("international_phone_number") or d.get("formatted_phone_number") or "",
+            "method": "google_places",
+            "title": d.get("name", ""),
+        }
+    except Exception:
+        return None
+
 def resolve_website_for_row(row, location_hint, search_level):
     current = normalize_url(row.get("website", ""))
     if current:
@@ -391,8 +465,13 @@ def resolve_website_for_row(row, location_hint, search_level):
     loc = ", ".join([x for x in [city, location_hint] if x])
     candidates = []  # dicts: url, score, method, title
 
-    # Domain guesses: verify only a small number in Normal, more in Extra thorough.
-    guess_limit = 10 if search_level == "Normal" else 24
+    # Optional high-reliability source. Configure GOOGLE_PLACES_API_KEY in Streamlit secrets.
+    gp = google_places_lookup(name, location_hint)
+    if gp and gp.get("url"):
+        return gp["url"], "google_places", gp["url"] + " [100, google_places]", "high"
+
+    # Domain guesses: broader than prior versions, because many schools use predictable domains.
+    guess_limit = 28 if search_level == "Normal" else 70
     for gu in domain_guesses(name, country)[:guess_limit]:
         status, html = fetch(gu, timeout=5 if search_level == "Normal" else 7)
         if not html:
@@ -407,7 +486,9 @@ def resolve_website_for_row(row, location_hint, search_level):
     for v in variants:
         queries += [
             f'"{v}" official website',
+            f'"{v}" website',
             f'"{v}" "{city or location_hint}" school',
+            f'{v} school {location_hint}',
             f'"{v}" contact',
         ]
     if search_level == "Extra thorough":
@@ -418,9 +499,9 @@ def resolve_website_for_row(row, location_hint, search_level):
     for q in queries:
         if q.lower() not in qseen:
             qseen.add(q.lower()); qlist.append(q)
-    qlimit = 4 if search_level == "Normal" else 9
+    qlimit = 7 if search_level == "Normal" else 14
     for q in qlist[:qlimit]:
-        for res in web_search(q, max_results=6 if search_level == "Normal" else 10, timeout=8 if search_level == "Normal" else 11):
+        for res in web_search(q, max_results=8 if search_level == "Normal" else 12, timeout=8 if search_level == "Normal" else 11):
             u = normalize_url(res.get("url"))
             if not u:
                 continue
@@ -726,7 +807,7 @@ def export_bytes(df, excel=False):
 # ---------------- UI ----------------
 
 st.title("Prospect Discovery Engine")
-st.caption(f"{APP_VERSION} — stronger official website discovery")
+st.caption(f"{APP_VERSION} — stronger website coverage; optional Google Places support via Streamlit secrets")
 
 st.markdown("## Search criteria")
 st.write("Choose what you want to find and where to search. Advanced settings are in the sidebar.")
@@ -743,6 +824,10 @@ with col_d:
 
 with st.sidebar:
     st.header("Advanced settings")
+    if get_optional_secret("GOOGLE_PLACES_API_KEY"):
+        st.success("Google Places website lookup enabled")
+    else:
+        st.caption("Free lookup only. Add GOOGLE_PLACES_API_KEY in Streamlit secrets for near-complete official website/phone coverage.")
     search_level = st.radio("Search depth", ["Normal", "Extra thorough"], index=0, help="Normal searches for official websites and basic contacts. Extra thorough tries more queries/pages and takes longer.")
     find_more_contacts = st.checkbox("Find more contact details when missing", value=False)
     speed_label = st.select_slider("Processing speed", options=["Safe", "Balanced", "Fast"], value="Balanced")
