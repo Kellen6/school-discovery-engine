@@ -1,8 +1,8 @@
-# Prospect Discovery Engine v24.2
+# Prospect Discovery Engine v25
 
-This version puts **Sector** and **Location** on the main page, not the sidebar.
+Streamlit app for discovering prospects by sector/location, resolving official websites, scraping contact details, and exporting prospects.
 
-## Deploy on Streamlit
+## Deploy on Streamlit Community Cloud
 Upload these files to the root of your GitHub repo:
 - app.py
 - requirements.txt
@@ -10,4 +10,10 @@ Upload these files to the root of your GitHub repo:
 
 Then reboot the Streamlit app.
 
-If Streamlit still shows Sector/Location in the sidebar, it is running an old cached commit or the files were uploaded inside a folder rather than at repo root.
+## v25 focus
+- Stronger official website resolution for schools with missing map websites
+- Website candidate retention and confidence labels
+- Separate cached discovery candidates from enriched prospects
+- Sector + Location on main page
+- Stacked progress bars
+- CSV + Excel export
