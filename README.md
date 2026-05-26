@@ -1,18 +1,13 @@
-# Prospect Discovery Engine v24
+# Prospect Discovery Engine v24.2
 
-Streamlit app for discovering prospects, resolving official websites, and enriching email/phone contact details.
+This version puts **Sector** and **Location** on the main page, not the sidebar.
 
-## Deploy
-Upload these files to your GitHub repo used by Streamlit Cloud:
+## Deploy on Streamlit
+Upload these files to the root of your GitHub repo:
 - app.py
 - requirements.txt
 - README.md
 
-Then reboot the app.
+Then reboot the Streamlit app.
 
-## v24 changes
-- Three progress bars stay visible in a stack.
-- Normal mode uses a faster bounded website resolver.
-- Extra thorough mode attempts more website/contact sources.
-- One Prospects table and one export area.
-- CSV and Excel downloads.
+If Streamlit still shows Sector/Location in the sidebar, it is running an old cached commit or the files were uploaded inside a folder rather than at repo root.

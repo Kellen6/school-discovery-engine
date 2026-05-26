@@ -460,15 +460,27 @@ def export_bytes(df, excel=False):
 
 # UI
 st.title("Prospect Discovery Engine")
-st.caption("Find prospects, resolve official websites, and enrich contact details.")
+st.caption("v24.3 — Main-page search criteria. Sector and Location are intentionally outside the sidebar.")
+
+st.info("Start here: choose Sector and Location below. Advanced settings are in the sidebar.")
+
+st.markdown("## Search criteria")
+st.write("Choose what you want to find and where to search. Advanced settings are on the left.")
+col_a, col_b = st.columns([1, 2])
+with col_a:
+    sector = st.selectbox("Sector", list(SECTOR_PROFILES.keys()), index=0, key="main_sector_select")
+with col_b:
+    location = st.text_input("Location", "Cape Town, Western Cape, South Africa", key="main_location_input")
+
+col_c, col_d = st.columns(2)
+with col_c:
+    radius_km = st.slider("Search radius (km)", 1, 100, 10, key="main_radius_slider")
+with col_d:
+    max_candidates = st.slider("Maximum prospects", 10, 250, 50, step=10, key="main_max_prospects_slider")
 
 with st.sidebar:
-    st.header("Search")
-    sector = st.selectbox("Sector", list(SECTOR_PROFILES.keys()), index=0)
-    location = st.text_input("Location", "Cape Town, Western Cape, South Africa")
-    radius_km = st.slider("Search radius (km)", 1, 100, 10)
-    max_candidates = st.slider("Maximum prospects", 10, 250, 50, step=10)
-    st.divider()
+    st.header("Advanced settings")
+    st.caption("Sector and Location are on the main page under Search criteria.")
     search_level = st.radio("Search depth", ["Normal", "Extra thorough"], index=0, help="Normal is faster. Extra thorough tries more website/contact sources.")
     find_more_contacts = st.checkbox("Find more contact details when missing", value=False)
     speed_label = st.select_slider("Processing speed", options=["Safe", "Balanced", "Fast"], value="Balanced")
