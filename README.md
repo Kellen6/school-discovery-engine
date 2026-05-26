@@ -1,18 +1,26 @@
-# School Discovery Engine Free v5
+# School Discovery Engine Free v7
 
-This version is designed for free hosting on Streamlit Community Cloud.
+A free Streamlit app for discovering schools by location and scraping public school websites for contact details.
 
-Important: public search engines often block automated queries from cloud servers. v5 therefore uses a more reliable workflow:
+## What v7 does
 
-1. Paste source pages such as "best schools", school directory pages, IB/Cambridge pages, or official school URLs.
-2. The app scrapes outbound links.
-3. It keeps likely official school websites.
-4. It enriches and scores those schools.
-5. Export CSV/Excel for Airtable.
+- Finds candidate schools using OpenStreetMap / Overpass by location.
+- Optionally extracts official school links from pasted source/list pages.
+- Scrapes school homepages, contact pages, admissions pages, staff/team pages, leadership pages, and support pages.
+- Extracts visible emails, phone numbers, titles, role signals, and page sources.
+- Detects generic emails such as info@, admissions@, office@.
+- Attempts to infer email patterns only when multiple visible staff emails exist.
+- Scores fit for Laura's outreach based on curriculum, learning support/SEN, university counseling, AI/innovation, inclusion, admissions, and parent signals.
+- Exports Airtable-ready CSV and Excel files.
 
-## Run locally
+## Important limitations
+
+This app only uses public web pages. It does not bypass paywalls, CAPTCHAs, robots restrictions, or JavaScript-only content. Inferred emails are guesses and are clearly marked as unverified.
+
+## Run locally on Mac
 
 ```bash
+cd ~/Downloads/school_discovery_engine_free_v7
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -21,19 +29,28 @@ streamlit run app.py
 
 ## Deploy on Streamlit Community Cloud
 
-Upload these files to GitHub:
-- app.py
-- requirements.txt
-- README.md
+1. Upload these files to a public GitHub repo:
+   - app.py
+   - requirements.txt
+   - README.md
+2. Go to https://share.streamlit.io
+3. Create a new app from that GitHub repo.
+4. Main file path: `app.py`
+5. Deploy.
 
-Then deploy with main file: `app.py`.
+## Suggested workflow
 
-## Usage
+1. Enter a location such as `Cape Town, South Africa` or `Lagos, Nigeria`.
+2. Select school types and max results.
+3. Click `Find schools`.
+4. Review candidates.
+5. Click `Scrape selected/candidate school websites`.
+6. Download CSV/Excel and upload to Airtable.
 
-Start with source pages, one URL per line. Examples:
-- Best international schools in Cape Town pages
-- Best private schools in Johannesburg pages
-- School directory/category pages
-- Official school websites
+## Columns to watch
 
-The app excludes aggregator/listicle pages from final prospects but uses them as discovery sources.
+- `verified_emails`: emails visibly found on public pages.
+- `inferred_email_pattern`: detected pattern if enough visible emails exist.
+- `inferred_contacts`: possible unverified emails generated from names/titles.
+- `contact_confidence`: high/medium/low based on visible contacts and staff pages.
+- `fit_score`: Laura-fit score for outreach prioritization.
