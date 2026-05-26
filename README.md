@@ -1,8 +1,8 @@
-# School Discovery Engine v14
+# School Discovery Engine v14.1
 
 Free Streamlit workflow for finding schools, resolving websites, scraping public contact details, and exporting outreach-ready CSV/Excel files.
 
-## What v14 adds
+## What v14.1 adds
 
 - Website scraping for school home/contact/admissions/staff/support pages
 - Web search fallback when scraping does not find useful contact details

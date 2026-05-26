@@ -10,7 +10,9 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 
-APP_VERSION = "v14"
+APP_VERSION = "v14.1"
+
+DEBUG_LOG_BUFFER = []
 
 st.set_page_config(page_title="School Discovery Engine", layout="wide")
 
@@ -64,7 +66,11 @@ def init_state():
             st.session_state[k] = v
 
 def log(msg):
-    st.session_state.debug_log.append(str(msg))
+    # Thread-safe logging: background workers must not touch st.session_state.
+    try:
+        DEBUG_LOG_BUFFER.append(str(msg))
+    except Exception:
+        pass
 
 def safe_get(url, timeout=TIMEOUT, allow_redirects=True):
     try:
@@ -504,7 +510,11 @@ def resolve_websites_for_rows(rows, location_hint="", max_workers=6):
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(worker, i) for i in unresolved]
         for fut in as_completed(futures):
-            i, url, method = fut.result()
+            try:
+                i, url, method = fut.result()
+            except Exception as e:
+                log(f"Website resolver worker failed: {type(e).__name__}: {e}")
+                continue
             if url:
                 rows[i]["website"] = url
                 rows[i]["domain"] = domain_from_url(url)
@@ -879,7 +889,10 @@ def enrich_rows(rows, resolve_missing=True, location_hint="", max_workers=6, use
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = [ex.submit(scrape_school, r, location_hint, use_contact_search) for r in rows]
         for fut in as_completed(futures):
-            results.append(fut.result())
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                log(f"Scrape worker failed: {type(e).__name__}: {e}")
     # stable-ish sort by fit/contact/name
     results = sorted(results, key=lambda r: (r.get("fit_score",0), r.get("contact_confidence",0), r.get("school_name","")), reverse=True)
     return results
@@ -932,6 +945,7 @@ def clear_results():
     st.session_state.raw_candidates = pd.DataFrame()
     st.session_state.enriched_results = pd.DataFrame()
     st.session_state.debug_log = []
+    DEBUG_LOG_BUFFER.clear()
 
 init_state()
 
@@ -975,6 +989,7 @@ with st.form("discovery_form"):
 
 if submitted:
     st.session_state.debug_log = []
+    DEBUG_LOG_BUFFER.clear()
     with st.spinner("Running discovery..."):
         if mode.startswith("1"):
             rows = discover_by_location(location, radius, max_results)
@@ -1005,7 +1020,8 @@ if submitted:
 show_results()
 
 with st.expander("Debug log"):
-    if st.session_state.debug_log:
-        st.code("\n".join(st.session_state.debug_log))
+    combined_debug = list(st.session_state.get("debug_log", [])) + list(DEBUG_LOG_BUFFER)
+    if combined_debug:
+        st.code("\n".join(combined_debug))
     else:
         st.write("No debug messages yet.")
