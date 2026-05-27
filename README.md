@@ -1,18 +1,21 @@
-# Prospect Discovery Engine v34
+# Prospect Discovery Engine v34.2
 
-Streamlit prospect discovery and enrichment tool.
+Streamlit app for prospect discovery and enrichment.
 
-## Deploy on Streamlit Community Cloud
+## Includes
+- Schools optimized mode
+- Custom Search mode
+- Sector + Location on the main page
+- Search radius slider restored in Advanced Settings
+- Stacked progress bars
+- Website resolution and contact enrichment
+- CSV + Excel export
 
-1. Upload `app.py`, `requirements.txt`, and `README.md` to the root of your GitHub repo.
-2. In Streamlit Cloud, deploy `app.py`.
-3. Optional: add `GOOGLE_PLACES_API_KEY` in Streamlit Secrets for better website/phone coverage.
+## Run locally
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-## v34 focus
-
-- Restores the stronger website resolver baseline from v26/v33.
-- Keeps optimized Schools mode and Custom Search mode.
-- Keeps algorithmic custom profile expansion.
-- Keeps optional Google Places support.
-- Adds safer contact enrichment: homepage/contact/admissions/team pages, `mailto:`, `tel:`, visible text, JSON-LD, and optional PDFs.
-- Maintains sector/location on the main page, advanced controls in the sidebar, stacked progress bars, one Prospects table, and CSV/Excel export.
+## Streamlit Cloud
+Upload `app.py`, `requirements.txt`, and `README.md` to the root of your GitHub repo.

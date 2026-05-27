@@ -198,7 +198,7 @@ def extract_phones(text, country):
         out=list(candidates)
     return sorted(set(out))
 
-def discover(location, sector_label, max_results=50):
+def discover(location, sector_label, max_results=50, radius_km=30):
     t0=time.time(); results=[]
     # geocode
     try:
@@ -213,7 +213,8 @@ def discover(location, sector_label, max_results=50):
     terms = SCHOOL_TERMS if sector_label=="schools" else st.session_state.profile.get("entity_terms", [sector_label])
     # Overpass for schools; Nominatim generic fallback for all sectors
     if lat is not None and sector_label=="schools":
-        q = f"""[out:json][timeout:25];(node(around:30000,{lat},{lon})[amenity~\"school|college|university|kindergarten\"];way(around:30000,{lat},{lon})[amenity~\"school|college|university|kindergarten\"];relation(around:30000,{lat},{lon})[amenity~\"school|college|university|kindergarten\"];);out center tags {max_results};"""
+        radius_m = int(radius_km * 1000)
+        q = f"""[out:json][timeout:25];(node(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten\"];way(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten\"];relation(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten\"];);out center tags {max_results};"""
         try:
             r=requests.post("https://overpass-api.de/api/interpreter", data={"data":q}, headers=HEADERS, timeout=35)
             log(f"Overpass POST https://overpass-api.de/api/interpreter: HTTP {r.status_code}")
@@ -338,7 +339,7 @@ def to_excel(df):
     return buf.getvalue()
 
 st.title("Prospect Discovery Engine")
-st.caption("Find prospects by location, resolve official websites, and enrich phone/email contact data.")
+st.caption("Find prospects by sector and location, resolve official websites, and enrich phone/email contact data.")
 
 col1,col2=st.columns([1,2])
 with col1:
@@ -357,6 +358,7 @@ with col2:
 with st.sidebar:
     st.header("Advanced settings")
     max_results=st.slider("Maximum prospects", 10, 200, 50, 10)
+    radius_km=st.slider("Search radius (km)", 1, 100, 30, 1)
     speed_label=st.select_slider("Processing speed", options=["Slow", "Balanced", "Fast"], value="Balanced")
     workers={"Slow":2,"Balanced":5,"Fast":10}[speed_label]
     extra_contacts=st.checkbox("Find more contact details when missing", value=False)
@@ -375,7 +377,7 @@ if run:
     st.session_state.debug=[]; st.session_state.timing={}
     total_start=time.time()
     p1.progress(5, text="Finding prospects in location…")
-    candidates=discover(location, sector, max_results=max_results)
+    candidates=discover(location, sector, max_results=max_results, radius_km=radius_km)
     p1.progress(100, text=f"Discovery complete: {len(candidates)} prospects")
     p2.progress(5, text="Resolving websites and enriching contacts…")
     t=time.time(); rows=[]
