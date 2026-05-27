@@ -1,12 +1,14 @@
-# Prospect Discovery Engine v36
+# Prospect Discovery Engine v37
 
-Streamlit app for prospect discovery by sector/location.
+Recovery/merge build.
 
-Key v36 fixes:
-- Candidate retention: website failures never remove prospects.
-- Broader school discovery: more OSM tags and school search terms.
-- Retention diagnostics: raw found, no-name Overpass elements, false positives, duplicates, retained prospects.
-- Conditional contact enrichment: when phone/email are missing, bounded contact search fallback runs.
-- Search-derived email/phone fields retained separately.
+## What this version does
+- Restores v35 discovery behavior so prospects are not lost upstream.
+- Keeps prospects even when website resolution fails.
+- Uses less aggressive deduplication: name + address/location, not just name.
+- Adds conditional contact search fallback when website scraping misses email or phone.
+- Adds `search_emails` and `search_phone` fields.
+- Preserves radius slider, optimized Schools mode, Custom Search mode, progress bars, metrics, CSV and Excel export.
 
-Deploy on Streamlit Community Cloud with `app.py` as the entrypoint.
+## Streamlit
+Deploy with `app.py` as the main file.

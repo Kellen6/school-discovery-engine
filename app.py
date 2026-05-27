@@ -12,7 +12,7 @@ except Exception:
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-HEADERS = {"User-Agent": "ProspectDiscoveryEngine/34 contact-enrichment research"}
+HEADERS = {"User-Agent": "ProspectDiscoveryEngine/37 recovery-contact-merge"}
 COMMON_FALSE_DOMAINS = {
     "palmolive.com", "palmolive.org", "nairobi.com", "olm.com", "bps.com", "msps.com",
     "academy.com", "school.com", "college.com", "education.com", "primaryschool.com"
@@ -20,11 +20,6 @@ COMMON_FALSE_DOMAINS = {
 DIRECTORY_HINTS = ["directory", "listing", "yelp", "waze", "facebook", "linkedin", "yellow", "primaryschool.co", "kenyaprimary", "schoolguide", "schools4sa", "businesslist"]
 COUNTRY_TLDS = {"south africa":"za", "kenya":"ke", "nigeria":"ng", "ghana":"gh", "uganda":"ug", "rwanda":"rw", "tanzania":"tz", "united kingdom":"uk", "canada":"ca", "united states":"us", "india":"in"}
 SCHOOL_TERMS = ["school", "college", "academy", "primary", "secondary", "high school", "preparatory", "prep", "international school"]
-SCHOOL_DISCOVERY_TERMS = [
-    "school", "primary school", "high school", "secondary school", "private school", "public school",
-    "pre primary school", "pre-primary school", "preschool", "nursery school", "preparatory school",
-    "international school", "academy", "college", "kindergarten"
-]
 SCHOOL_EXCLUDES = ["driving school", "testing yard", "residence", "hostel", "student accommodation", "parking", "training college"]
 DEFAULT_PAGES = ["contact", "contact-us", "admissions", "admission", "about", "staff", "team", "leadership"]
 DEEP_PAGES = DEFAULT_PAGES + ["apply", "fees", "downloads", "prospectus", "newsletter", "campus", "locations", "support", "learning-support", "vacancies"]
@@ -208,7 +203,7 @@ def discover(location, sector_label, max_results=50, radius_km=30):
     Only obvious false positives are removed here. Website failure is handled later as a status, not a filter.
     """
     t0=time.time(); results=[]
-    retention={"raw_found":0,"false_positives_removed":0,"duplicates_removed":0,"retained_prospects":0,"overpass_found":0,"overpass_named":0,"overpass_no_name":0,"nominatim_found":0,"nominatim_named":0}
+    retention={"raw_found":0,"false_positives_removed":0,"duplicates_removed":0,"retained_prospects":0,"overpass_found":0,"nominatim_found":0}
     # geocode
     try:
         gq = "https://nominatim.openstreetmap.org/search?q="+quote_plus(location)+"&format=jsonv2&limit=1&addressdetails=1"
@@ -219,19 +214,11 @@ def discover(location, sector_label, max_results=50, radius_km=30):
     except Exception as e:
         log(f"Geocode failed: {e}")
         lat, lon = None, None
-    terms = SCHOOL_DISCOVERY_TERMS if sector_label=="schools" else st.session_state.profile.get("entity_terms", [sector_label])
+    terms = SCHOOL_TERMS if sector_label=="schools" else st.session_state.profile.get("entity_terms", [sector_label])
     # Overpass for schools; Nominatim generic fallback for all sectors
     if lat is not None and sector_label=="schools":
         radius_m = int(radius_km * 1000)
-        q = f"""[out:json][timeout:30];(
-node(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten|childcare|music_school|language_school\"];
-way(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten|childcare|music_school|language_school\"];
-relation(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten|childcare|music_school|language_school\"];
-node(around:{radius_m},{lat},{lon})[building~\"school|college|university|kindergarten\"];
-way(around:{radius_m},{lat},{lon})[building~\"school|college|university|kindergarten\"];
-node(around:{radius_m},{lat},{lon})[office~\"educational_institution|education\"];
-way(around:{radius_m},{lat},{lon})[office~\"educational_institution|education\"];
-);out center tags {max_results*4};"""
+        q = f"""[out:json][timeout:25];(node(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten\"];way(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten\"];relation(around:{radius_m},{lat},{lon})[amenity~\"school|college|university|kindergarten\"];);out center tags {max_results};"""
         try:
             r=requests.post("https://overpass-api.de/api/interpreter", data={"data":q}, headers=HEADERS, timeout=35)
             log(f"Overpass POST https://overpass-api.de/api/interpreter: HTTP {r.status_code}")
@@ -241,11 +228,8 @@ way(around:{radius_m},{lat},{lon})[office~\"educational_institution|education\"]
                 log(f"Overpass candidates: {len(elems)}")
                 for el in elems:
                     tags=el.get("tags", {})
-                    name=tags.get("name") or tags.get("operator") or tags.get("brand") or ""
-                    if not name:
-                        retention["overpass_no_name"] += 1
-                        continue
-                    retention["overpass_named"] += 1
+                    name=tags.get("name") or tags.get("operator") or ""
+                    if not name: continue
                     results.append({"organization_name":name,"website":tags.get("website") or tags.get("contact:website") or "","osm_phone":tags.get("phone") or tags.get("contact:phone") or "","source":"overpass","address":tags.get("addr:street", ""),"lat":el.get("lat") or (el.get("center") or {}).get("lat"),"lon":el.get("lon") or (el.get("center") or {}).get("lon"),"country":country_from_location(location)})
         except Exception as e:
             log(f"Overpass failed: {type(e).__name__}")
@@ -260,7 +244,6 @@ way(around:{radius_m},{lat},{lon})[office~\"educational_institution|education\"]
             for item in items:
                 name=item.get("name") or item.get("display_name", "").split(",")[0]
                 if not name: continue
-                retention["nominatim_named"] += 1
                 et=item.get("extratags") or {}
                 results.append({"organization_name":name,"website":et.get("website") or "","osm_phone":et.get("phone") or "","source":"nominatim","address":item.get("display_name",""),"lat":item.get("lat"),"lon":item.get("lon"),"country":country_from_location(location)})
         except Exception as e:
@@ -517,9 +500,6 @@ if st.session_state.prospects is not None:
             st.json(st.session_state.retention)
             st.write("Timing")
             st.json(st.session_state.timing)
-            if "retention" in st.session_state:
-                st.write("Retention diagnostics")
-                st.json(st.session_state.retention)
             st.text("\n".join(st.session_state.debug[-80:]))
 else:
     if show_diag:
