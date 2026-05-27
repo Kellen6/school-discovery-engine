@@ -1,11 +1,12 @@
-# Prospect Discovery Engine v35
+# Prospect Discovery Engine v36
 
-Key v35 fixes:
-- Website failure never removes a prospect.
-- Only obvious false positives are filtered.
-- Dedupe is less aggressive: name + address/location, not name alone.
-- Restores on-page metric cards: Prospects, Websites, Emails, Phones.
-- Adds retention diagnostics: raw found, false positives removed, duplicates removed, retained prospects.
-- Keeps radius slider, optimized Schools mode, Custom Search mode, progress bars, CSV and Excel export.
+Streamlit app for prospect discovery by sector/location.
+
+Key v36 fixes:
+- Candidate retention: website failures never remove prospects.
+- Broader school discovery: more OSM tags and school search terms.
+- Retention diagnostics: raw found, no-name Overpass elements, false positives, duplicates, retained prospects.
+- Conditional contact enrichment: when phone/email are missing, bounded contact search fallback runs.
+- Search-derived email/phone fields retained separately.
 
 Deploy on Streamlit Community Cloud with `app.py` as the entrypoint.
