@@ -8,7 +8,7 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-UA = "ProspectDiscoveryEngine/40 (educational prospect research; contact: user@example.com)"
+UA = "ProspectDiscoveryEngine/40.1 (educational prospect research; contact: user@example.com)"
 REQ_TIMEOUT = 10
 
 SUSPICIOUS_GENERIC_DOMAINS = {
@@ -37,6 +37,7 @@ if "debug" not in st.session_state: st.session_state.debug=[]
 if "prospects" not in st.session_state: st.session_state.prospects=None
 if "timing" not in st.session_state: st.session_state.timing={}
 if "last_key" not in st.session_state: st.session_state.last_key=None
+if "geocode_cache" not in st.session_state: st.session_state.geocode_cache={}
 
 def log(msg):
     st.session_state.debug.append(str(msg))
@@ -97,14 +98,94 @@ def fetch_text(url, timeout=REQ_TIMEOUT):
     text=soup.get_text(" ", strip=True)
     return title, text[:200000], r.url
 
-def geocode(location):
+def stage_record(stage, status, **kwargs):
+    try:
+        if "stage_diagnostics" not in st.session_state:
+            st.session_state.stage_diagnostics=[]
+        rec={"stage":stage,"status":status,**kwargs}
+        st.session_state.stage_diagnostics.append(rec)
+    except Exception:
+        pass
+
+
+def geocode(location, manual_lat=None, manual_lon=None):
+    """Return lat/lon/country with resilient fallbacks.
+    Public Nominatim can return 403/rate-limit from Streamlit Cloud, so we:
+    1) use manual coordinates if supplied,
+    2) use session cache for repeated locations,
+    3) try Nominatim with a proper User-Agent,
+    4) fall back to Photon/Komoot geocoder,
+    5) return a clear failure diagnostic instead of silently returning 0 prospects.
+    """
+    loc_key=norm(location)
+    if manual_lat is not None and manual_lon is not None:
+        try:
+            lat=float(manual_lat); lon=float(manual_lon)
+            country=infer_country_from_location(location)
+            res={"lat":lat,"lon":lon,"display":f"Manual coordinates for {location}","country":country,"provider":"manual"}
+            st.session_state.geocode_cache[loc_key]=res
+            log(f"Geocode manual: {lat},{lon} for {location}")
+            stage_record("geocoding","success",provider="manual",lat=lat,lon=lon,country=country)
+            return res
+        except Exception as e:
+            log(f"Manual geocode invalid: {type(e).__name__}: {e}")
+            stage_record("geocoding","failed",provider="manual",error=str(e))
+
+    if loc_key in st.session_state.geocode_cache:
+        res=st.session_state.geocode_cache[loc_key]
+        log(f"Geocode cache hit: {location} -> {res.get('lat')},{res.get('lon')}")
+        stage_record("geocoding","success",provider="cache",lat=res.get("lat"),lon=res.get("lon"),country=res.get("country"))
+        return res
+
+    # Nominatim primary
     url=f"https://nominatim.openstreetmap.org/search?q={quote_plus(location)}&format=jsonv2&limit=1&addressdetails=1"
-    r=requests.get(url, headers={"User-Agent":UA}, timeout=20)
-    log(f"Geocode HTTP {r.status_code}: {url}")
-    data=r.json() if r.ok else []
-    if not data: return None
-    d=data[0]
-    return {"lat":float(d["lat"]),"lon":float(d["lon"]),"display":d.get("display_name",""),"country":d.get("address",{}).get("country", infer_country_from_location(location))}
+    try:
+        t=time.time()
+        r=requests.get(url, headers={"User-Agent":UA,"Accept":"application/json"}, timeout=20)
+        log(f"Geocode HTTP {r.status_code}: {url}")
+        stage_record("geocoding_provider","attempted",provider="nominatim",http_status=r.status_code,elapsed_seconds=round(time.time()-t,2))
+        if r.ok:
+            data=r.json()
+            if data:
+                d=data[0]
+                res={"lat":float(d["lat"]),"lon":float(d["lon"]),"display":d.get("display_name",""),"country":(d.get("address") or {}).get("country", infer_country_from_location(location)),"provider":"nominatim"}
+                st.session_state.geocode_cache[loc_key]=res
+                stage_record("geocoding","success",provider="nominatim",lat=res["lat"],lon=res["lon"],country=res.get("country"))
+                return res
+            else:
+                log("Nominatim returned no geocode results")
+        else:
+            # 403 means policy/rate-limit/shared hosted IP issue; continue to fallback.
+            log(f"Nominatim geocode failed HTTP {r.status_code}; trying fallback geocoder")
+    except Exception as e:
+        log(f"Nominatim geocode exception: {type(e).__name__}: {e}")
+        stage_record("geocoding_provider","failed",provider="nominatim",error=f"{type(e).__name__}: {e}")
+
+    # Photon fallback
+    purl=f"https://photon.komoot.io/api/?q={quote_plus(location)}&limit=1"
+    try:
+        t=time.time()
+        r=requests.get(purl, headers={"User-Agent":UA,"Accept":"application/json"}, timeout=20)
+        log(f"Photon geocode HTTP {r.status_code}: {purl}")
+        stage_record("geocoding_provider","attempted",provider="photon",http_status=r.status_code,elapsed_seconds=round(time.time()-t,2))
+        if r.ok:
+            data=r.json()
+            feats=data.get("features") or []
+            if feats:
+                f=feats[0]
+                lon,lat=f.get("geometry",{}).get("coordinates",[None,None])[:2]
+                props=f.get("properties") or {}
+                country=props.get("country") or infer_country_from_location(location)
+                res={"lat":float(lat),"lon":float(lon),"display":props.get("name") or location,"country":country,"provider":"photon"}
+                st.session_state.geocode_cache[loc_key]=res
+                stage_record("geocoding","success",provider="photon",lat=res["lat"],lon=res["lon"],country=res.get("country"))
+                return res
+    except Exception as e:
+        log(f"Photon geocode exception: {type(e).__name__}: {e}")
+        stage_record("geocoding_provider","failed",provider="photon",error=f"{type(e).__name__}: {e}")
+
+    stage_record("geocoding","failed",provider="all",location=location,error="all geocoders failed")
+    return None
 
 def overpass_schools(lat,lon,radius_km,limit):
     radius=int(radius_km*1000)
@@ -181,30 +262,75 @@ def dedupe(rows):
         seen.add(key); out.append(r)
     return out, dup
 
-def discover(sector, custom_term, location, radius, limit):
-    g=geocode(location)
-    if not g: return [], {"geocoded":False}
+def discover(sector, custom_term, location, radius, limit, manual_lat=None, manual_lon=None):
+    """Discover candidates. This function must NEVER return zero simply because websites fail.
+    Website validation happens later and only affects website/status fields.
+    """
+    g=geocode(location, manual_lat=manual_lat, manual_lon=manual_lon)
+    if not g:
+        return [], {"geocoded":False,"raw_found":0,"no_name":0,"false_positive_removed":0,"duplicates_removed":0,"retained":0,"note":"geocode failed"}
     country=g.get("country") or infer_country_from_location(location)
     if sector == "Schools (optimized)":
-        terms=["school","private school","international school","college","academy"]
+        terms=["school","private school","international school","primary school","secondary school","high school","college","academy","preparatory school"]
     else:
-        base=custom_term.strip()
-        terms=expand_custom_terms(base)
-    rows=overpass_schools(g["lat"],g["lon"],radius,limit) if sector == "Schools (optimized)" else []
-    # Nominatim fallback/additions
+        terms=expand_custom_terms(custom_term.strip())
+
+    rows=[]
+    overpass_count=0
+    if sector == "Schools (optimized)":
+        op=overpass_schools(g["lat"],g["lon"],radius,max(limit*2,80))
+        overpass_count=len(op)
+        rows.extend(op)
+
+    # Always supplement with text/place search. Do not stop early if Overpass returns fewer than cap.
     for t in terms:
-        if len(rows)>=limit: break
-        rows += nominatim_search(t, location, max(10, limit//2))
-        time.sleep(0.2)
+        if len(rows) >= max(limit*2,80):
+            break
+        rows.extend(nominatim_search(t, location, max(20, limit//2)))
+        time.sleep(0.15)
+
+    # Emergency broad fallback if upstream APIs behave oddly.
+    if not rows and sector == "Schools (optimized)":
+        for t in ["school", "college", "academy"]:
+            rows.extend(nominatim_search(t, location, 50))
+            time.sleep(0.15)
+
     for r in rows:
-        if not r.get("country"): r["country"]=country
-    no_name=sum(1 for r in rows if not r.get("prospect_name"))
-    rows=[r for r in rows if r.get("prospect_name")]
-    before=len(rows)
-    rows=[r for r in rows if not is_false_positive(r.get("prospect_name",""), sector)]
-    false_removed=before-len(rows)
+        if not r.get("country"):
+            r["country"]=country
+
+    raw_total=len(rows)
+    no_name=sum(1 for r in rows if not str(r.get("prospect_name","")).strip())
+    rows=[r for r in rows if str(r.get("prospect_name","")).strip()]
+
+    # Only remove obvious non-prospects. Do NOT require website or official-site validation here.
+    before_filter=len(rows)
+    kept=[]; removed=[]
+    for r in rows:
+        if is_false_positive(r.get("prospect_name",""), sector):
+            removed.append(r)
+        else:
+            kept.append(r)
+    rows=kept
+    false_removed=len(removed)
+
     rows, dup=dedupe(rows)
-    return rows[:limit], {"geocoded":True,"raw_found":before+no_name,"no_name":no_name,"false_positive_removed":false_removed,"duplicates_removed":dup,"retained":len(rows[:limit])}
+
+    # If filtering/dedupe accidentally collapses everything, recover unfiltered named rows.
+    if not rows and raw_total:
+        rows=[r for r in kept or [x for x in rows if str(x.get("prospect_name","")).strip()]]
+
+    retained=rows[:limit]
+    return retained, {
+        "geocoded":True,
+        "overpass_candidates":overpass_count,
+        "raw_found":raw_total,
+        "no_name":no_name,
+        "false_positive_removed":false_removed,
+        "duplicates_removed":dup,
+        "retained":len(retained),
+        "note":"websites are optional and never used to remove prospects"
+    }
 
 def expand_custom_terms(term):
     t=norm(term)
@@ -285,11 +411,11 @@ def score_website_candidate(name, country, location, url):
         score -= 8
     score -= base_penalty
     if final: url=canonical_url(final)
-    if score >= 65:
+    if score >= 70:
         status="verified official"
-    elif score >= 45:
+    elif score >= 50:
         status="likely official"
-    elif score >= 25:
+    elif score >= 20:
         status="candidate only"
     else:
         status="rejected false positive"
@@ -479,16 +605,24 @@ with st.sidebar:
     speed=st.select_slider("Processing speed", options=["Slow", "Balanced", "Fast"], value="Balanced")
     thorough=st.checkbox("Extra thorough website search", value=False)
     contact_fallback=st.checkbox("Find more contact details when missing", value=True)
+    use_manual_coords=st.checkbox("Use manual coordinates if geocoding is blocked", value=False)
+    if use_manual_coords:
+        manual_lat=st.number_input("Latitude", value=-33.9288, format="%.6f")
+        manual_lon=st.number_input("Longitude", value=18.4172, format="%.6f")
+    else:
+        manual_lat=None
+        manual_lon=None
     show_debug=st.checkbox("Show diagnostics", value=True)
 workers={"Slow":2,"Balanced":5,"Fast":10}[speed]
 
-key=hashlib.md5(json.dumps({"sector":sector,"custom":custom_term,"loc":location,"r":radius,"limit":limit,"thorough":thorough,"fallback":contact_fallback,"speed":speed},sort_keys=True).encode()).hexdigest()
+key=hashlib.md5(json.dumps({"sector":sector,"custom":custom_term,"loc":location,"r":radius,"limit":limit,"thorough":thorough,"fallback":contact_fallback,"speed":speed,"manual_lat":manual_lat,"manual_lon":manual_lon},sort_keys=True).encode()).hexdigest()
 
 if run:
     st.session_state.debug=[]
+    st.session_state.stage_diagnostics=[]
     t0=time.time()
     p1=st.progress(0, text="1/3 Discovering prospects")
-    rows, diag=discover(sector, custom_term, location, radius, limit)
+    rows, diag=discover(sector, custom_term, location, radius, limit, manual_lat=manual_lat, manual_lon=manual_lon)
     p1.progress(1.0, text=f"1/3 Discovery complete: {len(rows)} prospects retained")
     t1=time.time()
     p2=st.progress(0, text="2/3 Resolving websites")
@@ -514,7 +648,7 @@ if run:
     cols=[c for c in preferred if c in df.columns]+[c for c in df.columns if c not in preferred]
     df=df[cols]
     st.session_state.prospects=df
-    st.session_state.timing={"discovery_seconds":round(t1-t0,2),"enrichment_seconds":round(t2-t1,2),"total_seconds":round(t2-t0,2),"retention_diagnostics":diag,"search_depth":"Extra thorough" if thorough else "Normal","processing_speed":speed}
+    st.session_state.timing={"discovery_seconds":round(t1-t0,2),"enrichment_seconds":round(t2-t1,2),"total_seconds":round(t2-t0,2),"retention_diagnostics":diag,"search_depth":"Extra thorough" if thorough else "Normal","processing_speed":speed,"stage_diagnostics":st.session_state.get("stage_diagnostics",[])}
     st.session_state.last_key=key
 
 if st.session_state.prospects is not None:
@@ -536,6 +670,8 @@ if st.session_state.prospects is not None:
     if show_debug:
         with st.expander("Diagnostics", expanded=False):
             st.json(st.session_state.timing)
+            debug_payload={"timing":st.session_state.timing,"debug_log":st.session_state.debug[-500:]}
+            st.download_button("Download debug JSON", json.dumps(debug_payload, indent=2).encode("utf-8"), file_name=f"{fname}_debug.json", mime="application/json")
             st.text("\n".join(st.session_state.debug[-200:]))
 else:
     st.info("Enter a prospect type and location, then click Find prospects.")
