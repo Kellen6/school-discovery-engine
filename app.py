@@ -1,575 +1,415 @@
 import streamlit as st
-import requests, re, json, time, io, hashlib, urllib.parse, concurrent.futures
-from bs4 import BeautifulSoup
 import pandas as pd
-import phonenumbers
-import tldextract
-from urllib.parse import urljoin, urlparse
+import requests, re, json, time, io, hashlib
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse, quote_plus
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-
 try:
-    import PyPDF2
+    import phonenumbers
 except Exception:
-    PyPDF2 = None
+    phonenumbers = None
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-UA = "ProspectDiscoveryEngine/32 contact-research bot"
-TIMEOUT = 12
+HEADERS = {"User-Agent": "ProspectDiscoveryEngine/34 contact-enrichment research"}
+COMMON_FALSE_DOMAINS = {
+    "palmolive.com", "palmolive.org", "nairobi.com", "olm.com", "bps.com", "msps.com",
+    "academy.com", "school.com", "college.com", "education.com", "primaryschool.com"
+}
+DIRECTORY_HINTS = ["directory", "listing", "yelp", "waze", "facebook", "linkedin", "yellow", "primaryschool.co", "kenyaprimary", "schoolguide", "schools4sa", "businesslist"]
+COUNTRY_TLDS = {"south africa":"za", "kenya":"ke", "nigeria":"ng", "ghana":"gh", "uganda":"ug", "rwanda":"rw", "tanzania":"tz", "united kingdom":"uk", "canada":"ca", "united states":"us", "india":"in"}
+SCHOOL_TERMS = ["school", "college", "academy", "primary", "secondary", "high school", "preparatory", "prep", "international school"]
+SCHOOL_EXCLUDES = ["driving school", "testing yard", "residence", "hostel", "student accommodation", "parking", "training college"]
+DEFAULT_PAGES = ["contact", "contact-us", "admissions", "admission", "about", "staff", "team", "leadership"]
+DEEP_PAGES = DEFAULT_PAGES + ["apply", "fees", "downloads", "prospectus", "newsletter", "campus", "locations", "support", "learning-support", "vacancies"]
 
-# ------------------------- State/helpers -------------------------
-for k, v in {
-    "debug": [], "timing": {}, "prospects": None, "candidate_key": None,
-    "last_inputs": None, "profile": None
+for key, default in {
+    "debug": [], "prospects": None, "candidate_key": None, "timing": {}, "profile": None
 }.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 def log(msg):
-    try:
-        st.session_state.debug.append(str(msg))
-    except Exception:
-        pass
+    st.session_state.debug.append(str(msg))
 
-def norm_space(s):
+def norm(s):
     return re.sub(r"\s+", " ", str(s or "")).strip()
 
 def slug(s):
-    return re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")[:80] or "prospects"
+    return re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")[:80]
 
-def get_country_from_location(location):
-    parts = [p.strip() for p in str(location).split(',') if p.strip()]
+def tokens(s):
+    return [t for t in re.findall(r"[a-z0-9]+", str(s or "").lower()) if len(t) > 2 and t not in {"the","and","of","for","primary","secondary","school","college","academy"}]
+
+def country_from_location(location):
+    parts = [p.strip() for p in location.split(",") if p.strip()]
     return parts[-1] if parts else ""
 
-COUNTRY_TLDS = {
-    "south africa": [".co.za", ".org.za", ".ac.za", ".school.za", ".edu.za"],
-    "kenya": [".ac.ke", ".co.ke", ".or.ke", ".sc.ke", ".go.ke"],
-    "nigeria": [".edu.ng", ".sch.ng", ".com.ng", ".org.ng"],
-    "ghana": [".edu.gh", ".com.gh", ".org.gh"],
-    "tanzania": [".ac.tz", ".co.tz", ".or.tz", ".sc.tz"],
-    "uganda": [".ac.ug", ".co.ug", ".or.ug", ".sc.ug"],
-    "rwanda": [".ac.rw", ".co.rw", ".org.rw", ".rw"],
-    "united kingdom": [".ac.uk", ".sch.uk", ".org.uk", ".co.uk"],
-    "united states": [".edu", ".org", ".com", ".us"],
-}
-
-GENERIC_BAD_DOMAINS = set("""
-facebook.com instagram.com linkedin.com youtube.com wikipedia.org waze.com google.com google.co.za
-palmolive.com bps.com msps.com olm.com nairobi.com olympic.edu busara.org
-""".split())
-DIRECTORY_HINTS = ["directory", "listing", "review", "top", "best", "schools near", "primaryschool.co", "kenyaprimary", "businesslist", "yellow", "waze", "maps", "facebook.com"]
-SCHOOL_WORDS = ["school", "college", "academy", "primary", "secondary", "high", "junior", "preparatory", "prep", "kindergarten", "learning", "campus", "education"]
-
-# ------------------------- Profile expansion -------------------------
-def build_profile(mode, custom_term=""):
-    if mode == "Schools (optimized)":
-        return {
-            "sector": "schools",
-            "entity_terms": ["school", "private school", "international school", "primary school", "secondary school", "college", "academy"],
-            "include_terms": SCHOOL_WORDS,
-            "exclude_terms": ["driving school", "testing yard", "license", "residence", "hostel", "student accommodation", "course", "jobs"],
-            "priority_pages_fast": ["contact", "contact-us", "admissions", "about"],
-            "priority_pages_deep": ["staff", "team", "leadership", "principal", "campus", "prep", "secondary", "kindergarten", "learning-support", "downloads", "prospectus", "fees", "newsletter"],
-            "role_terms": ["principal", "head", "headmaster", "headmistress", "admissions", "counselor", "counsellor", "learning support", "SEN", "registrar"],
-            "official_terms": SCHOOL_WORDS,
-        }
-    term = norm_space(custom_term).lower()
-    base = [term]
-    if "pizza" in term:
-        base += ["pizzeria", "pizza restaurant", "pizza takeaway", "italian restaurant"]
-        meta = "food"
-    elif any(x in term for x in ["physio", "physical therapist", "therapist"]):
-        base += ["physiotherapist", "physio clinic", "physiotherapy clinic", "rehabilitation clinic", "sports physio"]
-        meta = "healthcare"
-    else:
-        words = term.split()
-        base += [term.rstrip("s"), term + " business", term + " service", term + " company"]
-        meta = "generic"
-    return {
-        "sector": term or "custom",
-        "entity_terms": list(dict.fromkeys([b for b in base if b])),
-        "include_terms": [w for w in base if w] + ["contact", "services"],
-        "exclude_terms": ["jobs", "careers", "course", "training", "directory", "listing"],
-        "priority_pages_fast": ["contact", "contact-us", "about", "services"],
-        "priority_pages_deep": ["team", "staff", "people", "locations", "booking", "appointments", "menu", "downloads"],
-        "role_terms": ["owner", "manager", "director", "reception", "administrator"],
-        "official_terms": ["contact", "services", "about"] + base,
-    }
-
-# ------------------------- HTTP/search -------------------------
-def fetch(url, timeout=TIMEOUT):
-    try:
-        r = requests.get(url, headers={"User-Agent": UA}, timeout=timeout, allow_redirects=True)
-        if r.status_code >= 400:
-            return None, f"HTTP {r.status_code}"
-        return r, "ok"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+def country_tld(country):
+    return COUNTRY_TLDS.get(str(country).lower(), "")
 
 def clean_url(url):
-    if not url:
-        return ""
+    if not url: return ""
     url = str(url).strip()
-    if not url.startswith(("http://", "https://")):
+    if url and not url.startswith(("http://", "https://")):
         url = "https://" + url
-    p = urlparse(url)
-    return f"{p.scheme}://{p.netloc}{p.path}".rstrip("/")
+    return url
 
 def domain(url):
     try:
-        return tldextract.extract(url).registered_domain.lower()
-    except Exception:
-        return urlparse(url).netloc.lower().replace("www.", "")
-
-def ddg_search(query, max_results=8):
-    # HTML endpoint; best-effort on Streamlit Cloud
-    url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    r, status = fetch(url, timeout=14)
-    log(f"DDG '{query[:80]}': {status}")
-    results = []
-    if not r:
-        return results
-    soup = BeautifulSoup(r.text, "lxml")
-    for a in soup.select("a.result__a")[:max_results]:
-        href = a.get("href") or ""
-        title = norm_space(a.get_text(" "))
-        # unwrap DDG redirect
-        if "uddg=" in href:
-            qs = urllib.parse.parse_qs(urlparse(href).query)
-            href = qs.get("uddg", [href])[0]
-        results.append({"url": clean_url(href), "title": title})
-    return results
-
-# ------------------------- Discovery -------------------------
-def geocode(location):
-    url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode({"q": location, "format":"jsonv2", "limit":1, "addressdetails":1})
-    r, status = fetch(url, timeout=15)
-    log(f"Geocode {status}: {url}")
-    if not r:
-        return None
-    data = r.json()
-    return data[0] if data else None
-
-def overpass_discover(lat, lon, radius_km, profile, max_n):
-    terms = profile["entity_terms"]
-    # Generic OSM query using common POI tags and name regex for custom terms
-    name_regex = "|".join([re.escape(t) for t in terms[:8]])
-    query = f"""
-    [out:json][timeout:25];
-    (
-      node(around:{int(radius_km*1000)},{lat},{lon})[amenity~"school|college|university|kindergarten|restaurant|clinic|doctors|hospital"];
-      way(around:{int(radius_km*1000)},{lat},{lon})[amenity~"school|college|university|kindergarten|restaurant|clinic|doctors|hospital"];
-      node(around:{int(radius_km*1000)},{lat},{lon})[name~"{name_regex}",i];
-      way(around:{int(radius_km*1000)},{lat},{lon})[name~"{name_regex}",i];
-    ); out center tags {max_n};
-    """
-    endpoints = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter", "https://overpass.osm.ch/api/interpreter"]
-    rows=[]
-    for ep in endpoints:
-        try:
-            rr = requests.post(ep, data={"data": query}, headers={"User-Agent": UA}, timeout=32)
-            log(f"Overpass POST {ep}: HTTP {rr.status_code}")
-            if rr.status_code != 200: continue
-            js = rr.json()
-            for el in js.get("elements", [])[:max_n*3]:
-                tags = el.get("tags", {})
-                name = tags.get("name") or tags.get("operator") or ""
-                if not name: continue
-                rows.append({
-                    "organization_name": name,
-                    "sector": profile["sector"],
-                    "address": tags.get("addr:full") or ", ".join([tags.get(k,"") for k in ["addr:housenumber","addr:street","addr:city"] if tags.get(k)]),
-                    "city": tags.get("addr:city") or "",
-                    "country": tags.get("addr:country") or "",
-                    "lat": el.get("lat") or el.get("center",{}).get("lat"),
-                    "lon": el.get("lon") or el.get("center",{}).get("lon"),
-                    "website": tags.get("website") or tags.get("contact:website") or "",
-                    "osm_phone": tags.get("phone") or tags.get("contact:phone") or "",
-                    "source": "overpass",
-                })
-            if rows:
-                log(f"Overpass {ep}: {len(rows)} candidates")
-                break
-        except Exception as e:
-            log(f"Overpass error {ep}: {type(e).__name__}: {e}")
-    return rows
-
-def nominatim_text_discover(location, profile, max_n):
-    rows=[]
-    for term in profile["entity_terms"][:8]:
-        q = f"{term} in {location}"
-        url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode({"q":q,"format":"jsonv2","limit":max(10, max_n//2),"addressdetails":1,"extratags":1})
-        r,status=fetch(url,timeout=16)
-        log(f"Nominatim '{q}': {status}")
-        if not r: continue
-        try: data=r.json()
-        except Exception: data=[]
-        for it in data:
-            ext=it.get("extratags") or {}
-            addr=it.get("address") or {}
-            rows.append({
-                "organization_name": it.get("name") or it.get("display_name","").split(',')[0],
-                "sector": profile["sector"],
-                "address": it.get("display_name",""),
-                "city": addr.get("city") or addr.get("town") or addr.get("suburb") or "",
-                "country": addr.get("country") or get_country_from_location(location),
-                "lat": it.get("lat"), "lon": it.get("lon"),
-                "website": ext.get("website") or ext.get("contact:website") or "",
-                "osm_phone": ext.get("phone") or ext.get("contact:phone") or "",
-                "source": "nominatim",
-            })
-    return rows
-
-def is_false_positive_name(name, profile):
-    n=name.lower()
-    return any(x in n for x in profile.get("exclude_terms", []))
-
-def discover(location, radius_km, profile, max_n):
-    geo=geocode(location)
-    rows=[]
-    if geo:
-        rows += overpass_discover(float(geo["lat"]), float(geo["lon"]), radius_km, profile, max_n)
-    rows += nominatim_text_discover(location, profile, max_n)
-    seen=set(); out=[]
-    for r in rows:
-        name=norm_space(r.get("organization_name"))
-        if not name or is_false_positive_name(name, profile): continue
-        key=(name.lower(), str(r.get("lat"))[:7], str(r.get("lon"))[:7])
-        if key in seen: continue
-        seen.add(key); out.append(r)
-        if len(out)>=max_n: break
-    return out
-
-# ------------------------- Website resolution -------------------------
-def tokenize_name(name):
-    bad={"the","of","and","for","school","college","academy","primary","secondary","high","junior","pre","prep","campus","branch"}
-    toks=re.findall(r"[a-z0-9]+", name.lower())
-    return [t for t in toks if len(t)>2 and t not in bad]
-
-def is_directory_url(url):
-    d=domain(url); u=url.lower()
-    return any(h in d or h in u for h in DIRECTORY_HINTS)
-
-def local_tld_bonus(url, country):
-    c=(country or "").lower()
-    tlds=COUNTRY_TLDS.get(c, [])
-    u=url.lower()
-    return 25 if any(t in u for t in tlds) else 0
-
-def content_probe(url):
-    r,status=fetch(url,timeout=10)
-    if not r: return {"ok":False,"status":status,"title":"","text":""}
-    soup=BeautifulSoup(r.text[:250000],"lxml")
-    title=norm_space(soup.title.get_text(" ") if soup.title else "")
-    text=norm_space(soup.get_text(" "))[:6000]
-    return {"ok":True,"status":"ok","title":title,"text":text}
-
-def score_website_candidate(name, url, location, country, profile):
-    url=clean_url(url); d=domain(url)
-    if not d or d in GENERIC_BAD_DOMAINS: return -999, "rejected_bad_domain", None
-    if is_directory_url(url): return 10, "directory_contact_source", None
-    toks=tokenize_name(name); url_l=url.lower().replace('-', '').replace('.', '')
-    score=0; reasons=[]
-    # domain/name match
-    matches=sum(1 for t in toks if t in url_l)
-    score += matches*18
-    if matches: reasons.append(f"domain_match_{matches}")
-    score += local_tld_bonus(url,country)
-    if local_tld_bonus(url,country): reasons.append("local_tld")
-    # generic global penalty unless content proves it
-    if d.endswith((".com",".org",".net")) and local_tld_bonus(url,country)==0 and (country or "").lower() not in ["united states","usa"]:
-        score -= 20; reasons.append("generic_domain_penalty")
-    probe=content_probe(url)
-    if probe["ok"]:
-        hay=(probe["title"]+" "+probe["text"]).lower()
-        content_matches=sum(1 for t in toks if t in hay)
-        score += content_matches*12
-        if content_matches: reasons.append(f"content_match_{content_matches}")
-        official_matches=sum(1 for t in profile.get("official_terms",[]) if t.lower() in hay)
-        score += min(official_matches,5)*5
-        if any(x.lower() in hay for x in profile.get("exclude_terms",[])):
-            score -= 40; reasons.append("exclude_content")
-        loc_toks=tokenize_name(location)
-        if any(t in hay for t in loc_toks[:3]): score += 8; reasons.append("location_match")
-    else:
-        reasons.append("probe_failed")
-    return score, ";".join(reasons), probe
-
-def official_search_queries(name, location, profile):
-    return [
-        f'"{name}" official website',
-        f'"{name}" "{location}"',
-        f'"{name}" contact',
-        f'"{name}" {profile["sector"]}',
-    ]
-
-def resolve_website(row, location, country, profile, extra_thorough=False, use_places=False):
-    name=row.get("organization_name","")
-    existing=clean_url(row.get("website",""))
-    candidates=[]
-    if existing: candidates.append({"url":existing,"source":"map"})
-    qlist=official_search_queries(name, location, profile)
-    if extra_thorough:
-        qlist += [f'"{name}" phone', f'"{name}" admissions contact', f'"{name}" site:.{(country or "").lower()[:2]}']
-    for q in qlist[:6]:
-        for res in ddg_search(q, max_results=6):
-            if res.get("url"):
-                candidates.append({"url":res["url"],"source":"search","title":res.get("title","")})
-    # de-dupe by domain/path root
-    best=None; allc=[]; seen=set()
-    for c in candidates:
-        u=clean_url(c["url"]); d=domain(u)
-        if not d or d in seen: continue
-        seen.add(d)
-        sc, reason, probe=score_website_candidate(name,u,location,country,profile)
-        allc.append({"url":u,"score":sc,"reason":reason,"source":c.get("source")})
-        if best is None or sc>best["score"]: best={"url":u,"score":sc,"reason":reason,"source":c.get("source")}
-    if not best:
-        return "", "not_found", "", ""
-    cand_str=" | ".join([f'{x["url"]} ({x["score"]})' for x in sorted(allc,key=lambda x:x["score"],reverse=True)[:5]])
-    if best["score"] >= 75:
-        return best["url"], "verified_official", cand_str, best["reason"]
-    if best["score"] >= 50:
-        return best["url"], "likely_official", cand_str, best["reason"]
-    if best["score"] >= 25 and not is_directory_url(best["url"]):
-        return "", "candidate_only", cand_str, best["reason"]
-    return "", "not_found", cand_str, best["reason"]
-
-# ------------------------- Contact extraction -------------------------
-EMAIL_RE=re.compile(r"[A-Z0-9._%+\-]+\s*(?:@|\[at\]|\(at\)| at )\s*[A-Z0-9.\-]+\s*(?:\.|\[dot\]|\(dot\)| dot )\s*[A-Z]{2,}", re.I)
-
-def normalize_email(e):
-    e=e.strip().lower()
-    e=re.sub(r"\s*(\[at\]|\(at\)| at )\s*","@",e)
-    e=re.sub(r"\s*(\[dot\]|\(dot\)| dot )\s*",".",e)
-    e=re.sub(r"\s+","",e)
-    return e
-
-def extract_emails_from_text(text):
-    out=[]
-    for e in EMAIL_RE.findall(text or ""):
-        em=normalize_email(e)
-        if "@" in em and "." in em.split("@")[-1] and not any(b in em for b in ["example.com", "domain.com"]):
-            out.append(em)
-    return sorted(set(out))
-
-def extract_phones_from_text(text, country_name=""):
-    out=[]
-    region=None
-    if country_name:
-        # common manual map; phonenumbers region codes
-        mapping={"south africa":"ZA","kenya":"KE","nigeria":"NG","ghana":"GH","uganda":"UG","tanzania":"TZ","rwanda":"RW","united kingdom":"GB","united states":"US"}
-        region=mapping.get(country_name.lower())
-    raw=text or ""
-    # include tel-like and broad numeric candidates
-    candidates=re.findall(r"(?:\+?\d[\d\s().\-/]{6,}\d)", raw)
-    for c in candidates:
-        c=re.sub(r"[^+\d]","",c)
-        if len(c)<7 or len(c)>16: continue
-        try:
-            num=phonenumbers.parse(c, region)
-            if phonenumbers.is_valid_number(num):
-                out.append(phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.INTERNATIONAL))
-        except Exception:
-            continue
-    return sorted(set(out))
-
-def get_internal_links(base_url, soup, profile, deep=False):
-    links=[]; base_dom=domain(base_url)
-    keywords=profile["priority_pages_fast"] + (profile["priority_pages_deep"] if deep else [])
-    for a in soup.find_all("a", href=True):
-        href=a["href"].strip()
-        full=urljoin(base_url,href)
-        if domain(full)!=base_dom: continue
-        label=(href+" "+a.get_text(" ")).lower()
-        if any(k.lower() in label for k in keywords):
-            links.append(full)
-    # PDFs too
-    pdfs=[u for u in links if u.lower().endswith(".pdf")]
-    pages=[u for u in links if not u.lower().endswith(".pdf")]
-    return list(dict.fromkeys(pages))[:8], list(dict.fromkeys(pdfs))[:4]
-
-def extract_pdf_text(url):
-    if PyPDF2 is None: return ""
-    r,status=fetch(url,timeout=14)
-    if not r: return ""
-    if len(r.content)>3_000_000: return ""
-    try:
-        reader=PyPDF2.PdfReader(io.BytesIO(r.content))
-        txt="\n".join([(p.extract_text() or "") for p in reader.pages[:5]])
-        return txt
+        netloc = urlparse(clean_url(url)).netloc.lower().replace("www.", "")
+        return netloc.split(":")[0]
     except Exception:
         return ""
 
-def scrape_contacts(row, location, country, profile, find_more=False):
-    website=clean_url(row.get("website",""))
-    result={"visible_emails":"","generic_emails":"","best_email":"","website_phone":"","pdf_emails":"","pdf_phone":"","contact_pages":"","scrape_status":"no_website"}
-    if not website: return result
-    r,status=fetch(website,timeout=TIMEOUT)
-    if not r:
-        result["scrape_status"]="scrape_failed"; return result
-    soup=BeautifulSoup(r.text,"lxml")
-    texts=[soup.get_text(" ")]
-    pages,pdfs=get_internal_links(website,soup,profile,deep=find_more)
-    # Always include likely contact page if not found
-    for suffix in ["/contact", "/contact-us", "/admissions", "/about"]:
-        pages.append(urljoin(website,suffix))
-    pages=list(dict.fromkeys(pages))[: (10 if find_more else 5)]
-    fetched_pages=[]
+def is_directory_url(url):
+    u = (url or "").lower()
+    return any(h in u for h in DIRECTORY_HINTS)
+
+def fetch(url, timeout=10):
+    try:
+        r = requests.get(clean_url(url), headers=HEADERS, timeout=timeout, allow_redirects=True)
+        if r.status_code < 400 and r.text:
+            return r.url, r.text[:150000]
+    except Exception:
+        return "", ""
+    return "", ""
+
+def page_title_and_text(url):
+    real, html = fetch(url, timeout=8)
+    if not html: return real or url, "", ""
+    soup = BeautifulSoup(html, "html.parser")
+    title = norm(soup.title.get_text(" ")) if soup.title else ""
+    for tag in soup(["script", "style", "noscript"]): tag.decompose()
+    text = norm(soup.get_text(" "))[:6000]
+    return real or url, title, text
+
+def website_score(name, url, location, sector="schools"):
+    d = domain(url)
+    if not d or d in COMMON_FALSE_DOMAINS: return -100
+    if is_directory_url(url): return -10
+    real, title, text = page_title_and_text(url)
+    hay = f"{d} {title} {text}".lower()
+    score = 0
+    name_tokens = tokens(name)
+    if name_tokens:
+        hits = sum(1 for t in name_tokens if t in hay)
+        score += hits * 18
+        if hits >= max(1, len(name_tokens)-1): score += 25
+    loc_tokens = tokens(location)
+    score += min(15, sum(3 for t in loc_tokens if t in hay))
+    if sector == "schools":
+        if any(t in hay for t in SCHOOL_TERMS): score += 25
+        if any(x in hay for x in SCHOOL_EXCLUDES): score -= 35
+    else:
+        if any(t in hay for t in tokens(sector)): score += 15
+    c = country_from_location(location)
+    tld = country_tld(c)
+    if tld and d.endswith("."+tld): score += 20
+    if d.endswith((".ac."+tld, ".edu."+tld, ".school", ".edu")) and tld: score += 10
+    if d.endswith((".com", ".org", ".net")) and tld and tld not in {"us"}:
+        score -= 10
+    return score
+
+def duck_search(query, max_results=8):
+    # Lightweight HTML search fallback. May be blocked occasionally but fails silently.
+    out=[]
+    try:
+        url = "https://duckduckgo.com/html/?q=" + quote_plus(query)
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.select("a.result__a")[:max_results]:
+            href = a.get("href") or ""
+            text = norm(a.get_text(" "))
+            if href:
+                out.append((text, href))
+    except Exception as e:
+        log(f"Search failed for {query}: {type(e).__name__}")
+    return out
+
+def resolve_website(name, location, sector="schools", extra=False):
+    name = norm(name)
+    if not name: return "", "not found", "", ""
+    cands=[]
+    # search-first official website resolution
+    queries = [f'"{name}" "{location}" official website', f'"{name}" "{location}"', f'"{name}" school website'] if sector=="schools" else [f'"{name}" "{location}" official website', f'"{name}" "{location}" contact']
+    if extra:
+        queries += [f'"{name}" website', f'"{name}" contact phone email']
+    for q in queries[:4 if extra else 3]:
+        for title, href in duck_search(q, max_results=6):
+            href = clean_url(href)
+            d = domain(href)
+            if not d or d in COMMON_FALSE_DOMAINS: continue
+            cands.append(href)
+    # deterministic local-domain guesses, validated by fetching
+    base = re.sub(r"[^a-z0-9]", "", name.lower())
+    short = "".join(tokens(name)[:3])
+    tld = country_tld(country_from_location(location))
+    guesses=[]
+    if tld:
+        guesses += [f"https://www.{base}.co.{tld}", f"https://www.{base}.org.{tld}", f"https://www.{base}.ac.{tld}", f"https://www.{short}.co.{tld}", f"https://www.{short}.org.{tld}"]
+    guesses += [f"https://www.{base}.org", f"https://www.{base}.com"]
+    cands += guesses
+    # de-dupe by domain
+    seen=set(); scored=[]
+    for u in cands:
+        d=domain(u)
+        if not d or d in seen: continue
+        seen.add(d)
+        s=website_score(name,u,location,sector)
+        if s > -50:
+            scored.append((s,u))
+    scored.sort(reverse=True, key=lambda x:x[0])
+    cand_str = "; ".join([u for s,u in scored[:5]])
+    if not scored: return "", "not found", "", ""
+    top_s, top_u = scored[0]
+    if top_s >= 70: return top_u, "verified official", cand_str, str(top_s)
+    if top_s >= 45: return top_u, "likely official", cand_str, str(top_s)
+    return "", "candidates only", cand_str, str(top_s)
+
+def extract_emails(text):
+    text = text or ""
+    text = re.sub(r"\s*\[at\]\s*|\s*\(at\)\s*|\s+at\s+", "@", text, flags=re.I)
+    text = re.sub(r"\s*\[dot\]\s*|\s*\(dot\)\s*|\s+dot\s+", ".", text, flags=re.I)
+    emails = set(re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text))
+    bad = {"example.com", "domain.com"}
+    return sorted([e for e in emails if domain("https://"+e.split("@")[-1]) not in bad])
+
+def extract_phones(text, country):
+    if not text: return []
+    candidates = set()
+    for m in re.findall(r"(?:\+?\d[\d\s().\-]{6,}\d)", text):
+        raw = re.sub(r"\s+", " ", m).strip()
+        if len(re.sub(r"\D", "", raw)) < 8: continue
+        candidates.add(raw)
+    out=[]
+    if phonenumbers:
+        region_map = {"south africa":"ZA", "kenya":"KE", "nigeria":"NG", "ghana":"GH", "uganda":"UG", "rwanda":"RW", "tanzania":"TZ", "united kingdom":"GB", "canada":"CA", "united states":"US"}
+        region = region_map.get(str(country).lower())
+        for raw in candidates:
+            try:
+                pn = phonenumbers.parse(raw, region)
+                if phonenumbers.is_possible_number(pn) and phonenumbers.is_valid_number(pn):
+                    out.append(phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.INTERNATIONAL))
+            except Exception:
+                pass
+    else:
+        out=list(candidates)
+    return sorted(set(out))
+
+def discover(location, sector_label, max_results=50):
+    t0=time.time(); results=[]
+    # geocode
+    try:
+        gq = "https://nominatim.openstreetmap.org/search?q="+quote_plus(location)+"&format=jsonv2&limit=1&addressdetails=1"
+        gr = requests.get(gq, headers=HEADERS, timeout=15)
+        log(f"Geocode HTTP {gr.status_code}: {gq}")
+        gj = gr.json()[0]
+        lat, lon = float(gj["lat"]), float(gj["lon"])
+    except Exception as e:
+        log(f"Geocode failed: {e}")
+        lat, lon = None, None
+    terms = SCHOOL_TERMS if sector_label=="schools" else st.session_state.profile.get("entity_terms", [sector_label])
+    # Overpass for schools; Nominatim generic fallback for all sectors
+    if lat is not None and sector_label=="schools":
+        q = f"""[out:json][timeout:25];(node(around:30000,{lat},{lon})[amenity~\"school|college|university|kindergarten\"];way(around:30000,{lat},{lon})[amenity~\"school|college|university|kindergarten\"];relation(around:30000,{lat},{lon})[amenity~\"school|college|university|kindergarten\"];);out center tags {max_results};"""
+        try:
+            r=requests.post("https://overpass-api.de/api/interpreter", data={"data":q}, headers=HEADERS, timeout=35)
+            log(f"Overpass POST https://overpass-api.de/api/interpreter: HTTP {r.status_code}")
+            if r.status_code==200:
+                elems=r.json().get("elements", [])
+                log(f"Overpass candidates: {len(elems)}")
+                for el in elems:
+                    tags=el.get("tags", {})
+                    name=tags.get("name") or tags.get("operator") or ""
+                    if not name: continue
+                    low=name.lower()
+                    if any(x in low for x in SCHOOL_EXCLUDES): continue
+                    results.append({"organization_name":name,"website":tags.get("website") or tags.get("contact:website") or "","osm_phone":tags.get("phone") or tags.get("contact:phone") or "","source":"overpass","address":tags.get("addr:street", ""),"country":country_from_location(location)})
+        except Exception as e:
+            log(f"Overpass failed: {type(e).__name__}")
+    for term in terms[:8]:
+        try:
+            nq = f"{term} in {location}"
+            url="https://nominatim.openstreetmap.org/search?q="+quote_plus(nq)+"&format=jsonv2&limit="+str(max_results)+"&addressdetails=1&extratags=1"
+            r=requests.get(url, headers=HEADERS, timeout=18)
+            log(f"Nominatim '{nq}': HTTP {r.status_code}")
+            for item in r.json()[:max_results]:
+                name=item.get("name") or item.get("display_name", "").split(",")[0]
+                if not name: continue
+                et=item.get("extratags") or {}
+                results.append({"organization_name":name,"website":et.get("website") or "","osm_phone":et.get("phone") or "","source":"nominatim","address":item.get("display_name",""),"country":country_from_location(location)})
+        except Exception as e:
+            log(f"Nominatim failed for {term}: {type(e).__name__}")
+    # dedupe
+    seen=set(); out=[]
+    for r in results:
+        key=re.sub(r"[^a-z0-9]", "", r["organization_name"].lower())[:40]
+        if key in seen: continue
+        seen.add(key); out.append(r)
+        if len(out)>=max_results: break
+    st.session_state.timing["discovery_seconds"] = round(time.time()-t0,2)
+    return out
+
+def find_links_for_pages(base_url, pages):
+    links=[base_url]
+    real, html = fetch(base_url, timeout=10)
+    if html:
+        soup=BeautifulSoup(html,"html.parser")
+        for a in soup.find_all("a", href=True):
+            txt=(a.get_text(" ")+" "+a["href"]).lower()
+            if any(p.replace("-"," ") in txt.replace("-"," ") for p in pages):
+                links.append(urljoin(real or base_url, a["href"]))
+    # fallback common paths
     for p in pages:
-        rr,stt=fetch(p,timeout=TIMEOUT)
-        if rr:
-            fetched_pages.append(p)
-            sp=BeautifulSoup(rr.text,"lxml")
-            texts.append(sp.get_text(" "))
-            # mailto/tel extraction
-            mailtos=[a.get("href","") for a in sp.find_all("a", href=True) if a.get("href","").lower().startswith("mailto:")]
-            tels=[a.get("href","") for a in sp.find_all("a", href=True) if a.get("href","").lower().startswith("tel:")]
-            texts.extend([m.replace("mailto:","") for m in mailtos])
-            texts.extend([t.replace("tel:","") for t in tels])
-    pdf_text=""
-    if find_more:
-        # include PDFs from homepage/fetched pages and common suffixes
-        for suffix in ["/prospectus.pdf", "/fees.pdf", "/admissions.pdf"]: pdfs.append(urljoin(website,suffix))
-        for pdf in list(dict.fromkeys(pdfs))[:5]:
-            pdf_text += "\n" + extract_pdf_text(pdf)
-    all_text="\n".join(texts)
-    emails=extract_emails_from_text(all_text)
-    phones=extract_phones_from_text(all_text,country)
-    pdf_emails=extract_emails_from_text(pdf_text)
-    pdf_phones=extract_phones_from_text(pdf_text,country)
-    generic=[e for e in emails+pdf_emails if any(x in e.split('@')[0] for x in ["info","admin","admission","contact","office","enquir","reception"])]
-    best=(generic or emails or pdf_emails or [""])[0]
-    result.update({
-        "visible_emails":"; ".join(emails),
-        "generic_emails":"; ".join(sorted(set(generic))),
-        "pdf_emails":"; ".join(pdf_emails),
-        "best_email":best,
-        "website_phone":"; ".join(phones[:5]),
-        "pdf_phone":"; ".join(pdf_phones[:5]),
-        "best_phone": (phones+pdf_phones+[row.get("osm_phone","") or ""])[0],
-        "contact_pages":"; ".join(fetched_pages[:6]),
-        "scrape_status":"scraped"
+        links.append(urljoin(base_url, "/"+p))
+    seen=[]
+    for l in links:
+        if domain(l)==domain(base_url) and l not in seen:
+            seen.append(l)
+    return seen[:14]
+
+def enrich_row(row, location, sector, extra_contacts=False):
+    country=row.get("country") or country_from_location(location)
+    name=row.get("organization_name") or ""
+    website=clean_url(row.get("website") or "")
+    status="from source" if website else "not found"
+    candidates=""; wscore=""
+    if not website:
+        website,status,candidates,wscore=resolve_website(name, location, sector, extra=extra_contacts)
+    pages = DEEP_PAGES if extra_contacts else DEFAULT_PAGES
+    emails=set(); phones=set(); contact_pages=[]
+    if website:
+        for url in find_links_for_pages(website, pages):
+            real, html = fetch(url, timeout=10)
+            if not html: continue
+            contact_pages.append(real or url)
+            soup=BeautifulSoup(html,"html.parser")
+            for a in soup.find_all("a", href=True):
+                href=a["href"]
+                if href.lower().startswith("mailto:"):
+                    emails.update(extract_emails(href.replace("mailto:","")))
+                if href.lower().startswith("tel:"):
+                    phones.update(extract_phones(href.replace("tel:",""), country))
+            text=soup.get_text(" ") + " " + html[:50000]
+            emails.update(extract_emails(text))
+            phones.update(extract_phones(text, country))
+            if emails and phones and not extra_contacts:
+                break
+    osm_phone = row.get("osm_phone") or ""
+    if osm_phone:
+        phones.update(extract_phones(osm_phone, country))
+    best_email = sorted(emails)[0] if emails else ""
+    best_phone = sorted(phones)[0] if phones else ""
+    out=dict(row)
+    out.update({
+        "website": website,
+        "official_website_status": status,
+        "website_candidates": candidates,
+        "website_score": wscore,
+        "visible_emails": "; ".join(sorted(emails)),
+        "best_email": best_email,
+        "website_phone": "; ".join(sorted(phones)),
+        "best_phone": best_phone,
+        "contact_pages_checked": "; ".join(contact_pages[:5]),
+        "enrichment_status": "scraped" if website else "no_website"
     })
-    return result
+    return out
 
-# ------------------------- UI -------------------------
+def algorithmic_profile(query):
+    q=query.lower().strip()
+    terms={q, q.rstrip("s")}
+    if "pizza" in q:
+        terms.update(["pizza restaurant","pizzeria","pizza takeaway","Italian restaurant"])
+        meta="food business"; pages=["contact","menu","locations","order","about"]; roles=["owner","manager","reception"]
+    elif "physio" in q or "physical therapist" in q:
+        terms.update(["physiotherapist","physio clinic","physiotherapy clinic","rehabilitation clinic","sports physio"])
+        meta="healthcare provider"; pages=["contact","appointments","booking","team","services","about"]; roles=["practice manager","owner","reception","clinician"]
+    else:
+        terms.update([q+" business", q+" service", q+" company"])
+        meta="business"; pages=["contact","about","team","services","locations"]; roles=["owner","manager","director","reception"]
+    return {"sector":q, "meta_type":meta, "entity_terms":list(terms), "priority_pages":pages, "target_roles":roles, "exclude_terms":["jobs","courses","directory"]}
+
+def to_excel(df):
+    buf=io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer,index=False,sheet_name="Prospects")
+    return buf.getvalue()
+
 st.title("Prospect Discovery Engine")
-st.caption("Find prospects by sector and location, then enrich with websites, emails, phones, and contact sources.")
+st.caption("Find prospects by location, resolve official websites, and enrich phone/email contact data.")
 
-mode = st.radio("Prospect type", ["Schools (optimized)", "Custom search"], horizontal=True)
-if mode == "Custom search":
-    custom_term = st.text_input("What are you looking for?", value="physical therapists")
-else:
-    custom_term = "schools"
-location = st.text_input("Location", value="Cape Town, Western Cape, South Africa")
-
-profile = build_profile(mode, custom_term)
-with st.expander("Search profile", expanded=False):
-    st.json(profile)
+col1,col2=st.columns([1,2])
+with col1:
+    mode=st.radio("Prospect type", ["Schools (optimized)", "Custom search"], horizontal=False)
+with col2:
+    if mode=="Custom search":
+        custom=st.text_input("What are you looking for?", value="physical therapists")
+        st.session_state.profile=algorithmic_profile(custom)
+        with st.expander("Generated search profile", expanded=True):
+            st.json(st.session_state.profile)
+        sector="custom"
+    else:
+        custom="schools"; sector="schools"; st.session_state.profile={"entity_terms":SCHOOL_TERMS}
+    location=st.text_input("Location", value="Cape Town, Western Cape, South Africa")
 
 with st.sidebar:
     st.header("Advanced settings")
-    radius = st.slider("Search radius (km)", 2, 100, 20)
-    max_n = st.slider("Maximum prospects", 10, 200, 50, step=10)
-    speed_label = st.select_slider("Processing speed", options=["Safe", "Balanced", "Fast"], value="Balanced")
-    workers = {"Safe":2,"Balanced":5,"Fast":10}[speed_label]
-    search_depth = st.radio("Search depth", ["Normal", "Extra thorough"], index=0)
-    find_more_contacts = st.checkbox("Find more contact details when missing", value=True)
-    use_places = st.checkbox("Use Google Places for unresolved websites (optional)", value=False)
-    show_debug = st.checkbox("Show diagnostics", value=True)
+    max_results=st.slider("Maximum prospects", 10, 200, 50, 10)
+    speed_label=st.select_slider("Processing speed", options=["Slow", "Balanced", "Fast"], value="Balanced")
+    workers={"Slow":2,"Balanced":5,"Fast":10}[speed_label]
+    extra_contacts=st.checkbox("Find more contact details when missing", value=False)
+    extra_web=st.checkbox("Extra thorough website search", value=False)
+    show_diag=st.checkbox("Show diagnostics", value=True)
+    if st.button("Clear results"):
+        st.session_state.prospects=None; st.session_state.debug=[]; st.session_state.timing={}; st.rerun()
 
-p1 = st.empty(); p2 = st.empty(); p3 = st.empty()
-bar1 = st.progress(0, text="Discovery")
-bar2 = st.progress(0, text="Website resolution")
-bar3 = st.progress(0, text="Contact enrichment")
+run=st.button("Find prospects", type="primary")
 
-run = st.button("Find prospects", type="primary")
+p1=st.progress(0, text="Discovery not started")
+p2=st.progress(0, text="Website resolution not started")
+p3=st.progress(0, text="Contact enrichment not started")
 
 if run:
     st.session_state.debug=[]; st.session_state.timing={}
-    t0=time.time(); country=get_country_from_location(location)
-    bar1.progress(5, text="Finding prospects from map/search sources…")
-    candidates=discover(location, radius, profile, max_n)
-    bar1.progress(100, text=f"Discovery complete: {len(candidates)} prospects")
-    st.session_state.timing["discovery_seconds"] = round(time.time()-t0,2)
-
-    t1=time.time(); bar2.progress(5, text="Finding and validating official websites…")
-    # website resolution parallel
-    def wtask(r):
-        ctry=r.get("country") or country
-        url,status,cands,reason=resolve_website(r, location, ctry, profile, extra_thorough=(search_depth=="Extra thorough"), use_places=use_places)
-        r=dict(r)
-        raw=r.get("website","")
-        r["map_website"] = raw
-        r["website"] = url or (raw if status in ["verified_official","likely_official"] else "")
-        r["official_website_status"] = status
-        r["website_candidates"] = cands
-        r["website_resolution_reason"] = reason
-        return r
-    rows=[]
-    total=max(len(candidates),1); done=0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs=[ex.submit(wtask,r) for r in candidates]
-        for fut in concurrent.futures.as_completed(futs):
-            try: rows.append(fut.result())
-            except Exception as e: log(f"website task error: {type(e).__name__}: {e}")
-            done+=1; bar2.progress(min(100,int(done/total*100)), text=f"Website resolution: {done}/{total}")
-    st.session_state.timing["website_resolution_seconds"] = round(time.time()-t1,2)
-
-    t2=time.time(); bar3.progress(5, text="Scraping contact details…")
-    def etask(r):
-        deep = (search_depth=="Extra thorough")
-        # conditional deep: first standard; if missing phone/email, rerun deeper on extra pages/PDFs
-        base=scrape_contacts(r, location, r.get("country") or country, profile, find_more=deep)
-        if find_more_contacts and (not base.get("best_email") or not base.get("best_phone")) and r.get("website"):
-            deepres=scrape_contacts(r, location, r.get("country") or country, profile, find_more=True)
-            for k,v in deepres.items():
-                if v and (not base.get(k) or k in ["visible_emails","generic_emails","website_phone","pdf_emails","pdf_phone","contact_pages"]):
-                    base[k]=v
-        rr=dict(r); rr.update(base)
-        # merge best phone fallback
-        if not rr.get("best_phone"):
-            rr["best_phone"] = rr.get("website_phone") or rr.get("pdf_phone") or rr.get("osm_phone") or ""
-        rr["phone_source"] = "website" if rr.get("website_phone") else ("pdf" if rr.get("pdf_phone") else ("osm" if rr.get("osm_phone") else ""))
-        return rr
-    enriched=[]; done=0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs=[ex.submit(etask,r) for r in rows]
-        for fut in concurrent.futures.as_completed(futs):
-            try: enriched.append(fut.result())
-            except Exception as e: log(f"enrichment task error: {type(e).__name__}: {e}")
-            done+=1; bar3.progress(min(100,int(done/total*100)), text=f"Contact enrichment: {done}/{total}")
-    st.session_state.timing["enrichment_seconds"] = round(time.time()-t2,2)
-    st.session_state.timing["total_seconds"] = round(time.time()-t0,2)
-    st.session_state.timing["search_depth"] = search_depth
-    st.session_state.timing["processing_speed"] = speed_label
-    st.session_state.prospects = pd.DataFrame(enriched)
+    total_start=time.time()
+    p1.progress(5, text="Finding prospects in location…")
+    candidates=discover(location, sector, max_results=max_results)
+    p1.progress(100, text=f"Discovery complete: {len(candidates)} prospects")
+    p2.progress(5, text="Resolving websites and enriching contacts…")
+    t=time.time(); rows=[]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs=[ex.submit(enrich_row, r, location, sector, extra_contacts or extra_web) for r in candidates]
+        for i,f in enumerate(as_completed(futs),1):
+            try: rows.append(f.result())
+            except Exception as e: log(f"Enrichment row failed: {type(e).__name__}")
+            p2.progress(min(100, int(i/max(1,len(futs))*100)), text=f"Processed {i}/{len(futs)} prospects")
+    st.session_state.timing["website_resolution_seconds"] = round(time.time()-t,2)
+    p2.progress(100, text="Website/contact processing complete")
+    p3.progress(100, text="Contact enrichment complete")
+    st.session_state.timing["enrichment_seconds"] = st.session_state.timing.get("website_resolution_seconds",0)
+    st.session_state.timing["total_seconds"] = round(time.time()-total_start,2)
+    st.session_state.prospects=pd.DataFrame(rows)
 
 if st.session_state.prospects is not None:
     df=st.session_state.prospects.copy()
-    preferred=["organization_name","sector","website","official_website_status","best_email","visible_emails","generic_emails","best_phone","website_phone","pdf_phone","osm_phone","phone_source","contact_pages","website_candidates","address","source","scrape_status"]
-    cols=[c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
     st.subheader("Prospects")
-    st.dataframe(df[cols], use_container_width=True, height=420)
+    preferred=["organization_name","website","official_website_status","best_email","best_phone","visible_emails","website_phone","address","source","website_candidates","contact_pages_checked","enrichment_status"]
+    show=[c for c in preferred if c in df.columns]
+    st.dataframe(df[show], use_container_width=True, hide_index=True)
     ts=datetime.now().strftime("%Y%m%d_%H%M")
-    fname=f"prospect_discovery_{slug(profile['sector'])}_{slug(location)}_{ts}"
-    csv=df[cols].to_csv(index=False).encode("utf-8")
-    st.download_button("Download CSV", data=csv, file_name=f"{fname}.csv", mime="text/csv")
-    out=io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df[cols].to_excel(writer,index=False,sheet_name="Prospects")
-    st.download_button("Download Excel", data=out.getvalue(), file_name=f"{fname}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    c1,c2,c3,c4=st.columns(4)
-    c1.metric("Prospects", len(df))
-    c2.metric("Websites", int(df.get("website",pd.Series(dtype=str)).astype(str).ne("").sum()))
-    c3.metric("Best emails", int(df.get("best_email",pd.Series(dtype=str)).astype(str).ne("").sum()))
-    c4.metric("Best phones", int(df.get("best_phone",pd.Series(dtype=str)).astype(str).ne("").sum()))
-
-if show_debug:
-    with st.expander("Diagnostic details", expanded=False):
-        st.write("Timing")
-        st.json(st.session_state.timing)
-        st.write("Debug log")
-        st.text("\n".join(st.session_state.debug[-250:]))
+    fname=f"prospect_discovery_{slug(custom)}_{slug(location)}_{ts}"
+    c1,c2=st.columns(2)
+    with c1:
+        st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), file_name=fname+".csv", mime="text/csv")
+    with c2:
+        st.download_button("Download Excel", to_excel(df), file_name=fname+".xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if show_diag:
+        with st.expander("Diagnostics", expanded=False):
+            st.json(st.session_state.timing)
+            st.text("\n".join(st.session_state.debug[-80:]))
+else:
+    if show_diag:
+        with st.expander("Diagnostics", expanded=False):
+            st.write("Run a search to see timing and debug logs.")

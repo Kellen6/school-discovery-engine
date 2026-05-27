@@ -1,24 +1,18 @@
-# Prospect Discovery Engine v32
+# Prospect Discovery Engine v34
 
-Streamlit app for discovering prospects by sector/location and enriching them with official websites, emails and phones.
+Streamlit prospect discovery and enrichment tool.
 
-## v32 highlights
-- Optimized Schools mode preserved.
-- Custom Search mode preserved.
-- Stronger website identification with official-site validation and candidate retention.
-- Conditional deep contact enrichment: extra pages/PDFs/search only when phone/email are missing.
-- Extracts `mailto:`, `tel:`, schema/JSON-LD, visible text, and linked PDFs.
-- Country-aware phone validation.
-- Separates official websites from directory/contact-source pages.
+## Deploy on Streamlit Community Cloud
 
-## Deploy
-Upload `app.py`, `requirements.txt`, and `README.md` to the root of your GitHub repo and redeploy on Streamlit Cloud.
+1. Upload `app.py`, `requirements.txt`, and `README.md` to the root of your GitHub repo.
+2. In Streamlit Cloud, deploy `app.py`.
+3. Optional: add `GOOGLE_PLACES_API_KEY` in Streamlit Secrets for better website/phone coverage.
 
-## Optional Google Places
-Add in Streamlit secrets:
+## v34 focus
 
-```toml
-GOOGLE_PLACES_API_KEY = "your_key"
-```
-
-Use Places only for unresolved websites to control cost.
+- Restores the stronger website resolver baseline from v26/v33.
+- Keeps optimized Schools mode and Custom Search mode.
+- Keeps algorithmic custom profile expansion.
+- Keeps optional Google Places support.
+- Adds safer contact enrichment: homepage/contact/admissions/team pages, `mailto:`, `tel:`, visible text, JSON-LD, and optional PDFs.
+- Maintains sector/location on the main page, advanced controls in the sidebar, stacked progress bars, one Prospects table, and CSV/Excel export.
