@@ -25,7 +25,7 @@ DEFAULT_PAGES = ["contact", "contact-us", "admissions", "admission", "about", "s
 DEEP_PAGES = DEFAULT_PAGES + ["apply", "fees", "downloads", "prospectus", "newsletter", "campus", "locations", "support", "learning-support", "vacancies"]
 
 for key, default in {
-    "debug": [], "prospects": None, "candidate_key": None, "timing": {}, "profile": None
+    "debug": [], "prospects": None, "candidate_key": None, "timing": {}, "profile": None, "retention": {}
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -199,7 +199,11 @@ def extract_phones(text, country):
     return sorted(set(out))
 
 def discover(location, sector_label, max_results=50, radius_km=30):
+    """Find raw candidates. Important: discovery should retain valid prospects even when websites are missing.
+    Only obvious false positives are removed here. Website failure is handled later as a status, not a filter.
+    """
     t0=time.time(); results=[]
+    retention={"raw_found":0,"false_positives_removed":0,"duplicates_removed":0,"retained_prospects":0,"overpass_found":0,"nominatim_found":0}
     # geocode
     try:
         gq = "https://nominatim.openstreetmap.org/search?q="+quote_plus(location)+"&format=jsonv2&limit=1&addressdetails=1"
@@ -220,14 +224,13 @@ def discover(location, sector_label, max_results=50, radius_km=30):
             log(f"Overpass POST https://overpass-api.de/api/interpreter: HTTP {r.status_code}")
             if r.status_code==200:
                 elems=r.json().get("elements", [])
+                retention["overpass_found"]=len(elems)
                 log(f"Overpass candidates: {len(elems)}")
                 for el in elems:
                     tags=el.get("tags", {})
                     name=tags.get("name") or tags.get("operator") or ""
                     if not name: continue
-                    low=name.lower()
-                    if any(x in low for x in SCHOOL_EXCLUDES): continue
-                    results.append({"organization_name":name,"website":tags.get("website") or tags.get("contact:website") or "","osm_phone":tags.get("phone") or tags.get("contact:phone") or "","source":"overpass","address":tags.get("addr:street", ""),"country":country_from_location(location)})
+                    results.append({"organization_name":name,"website":tags.get("website") or tags.get("contact:website") or "","osm_phone":tags.get("phone") or tags.get("contact:phone") or "","source":"overpass","address":tags.get("addr:street", ""),"lat":el.get("lat") or (el.get("center") or {}).get("lat"),"lon":el.get("lon") or (el.get("center") or {}).get("lon"),"country":country_from_location(location)})
         except Exception as e:
             log(f"Overpass failed: {type(e).__name__}")
     for term in terms[:8]:
@@ -236,20 +239,38 @@ def discover(location, sector_label, max_results=50, radius_km=30):
             url="https://nominatim.openstreetmap.org/search?q="+quote_plus(nq)+"&format=jsonv2&limit="+str(max_results)+"&addressdetails=1&extratags=1"
             r=requests.get(url, headers=HEADERS, timeout=18)
             log(f"Nominatim '{nq}': HTTP {r.status_code}")
-            for item in r.json()[:max_results]:
+            items=r.json()[:max_results]
+            retention["nominatim_found"] += len(items)
+            for item in items:
                 name=item.get("name") or item.get("display_name", "").split(",")[0]
                 if not name: continue
                 et=item.get("extratags") or {}
-                results.append({"organization_name":name,"website":et.get("website") or "","osm_phone":et.get("phone") or "","source":"nominatim","address":item.get("display_name",""),"country":country_from_location(location)})
+                results.append({"organization_name":name,"website":et.get("website") or "","osm_phone":et.get("phone") or "","source":"nominatim","address":item.get("display_name",""),"lat":item.get("lat"),"lon":item.get("lon"),"country":country_from_location(location)})
         except Exception as e:
             log(f"Nominatim failed for {term}: {type(e).__name__}")
-    # dedupe
-    seen=set(); out=[]
+    retention["raw_found"] = len(results)
+    # Keep candidates unless obvious false positives. Do NOT remove for missing websites.
+    filtered=[]
     for r in results:
-        key=re.sub(r"[^a-z0-9]", "", r["organization_name"].lower())[:40]
-        if key in seen: continue
+        low=(r.get("organization_name","")+" "+r.get("address","")).lower()
+        if any(x in low for x in SCHOOL_EXCLUDES):
+            retention["false_positives_removed"] += 1
+            continue
+        filtered.append(r)
+    # Dedupe by name + address/coordinates, not just name. This avoids collapsing campuses/prep/pre-primary.
+    seen=set(); out=[]
+    for r in filtered:
+        name_key=re.sub(r"[^a-z0-9]", "", r.get("organization_name","").lower())[:50]
+        addr_key=re.sub(r"[^a-z0-9]", "", r.get("address","").lower())[:35]
+        latlon=f"{str(r.get('lat',''))[:7]}:{str(r.get('lon',''))[:7]}"
+        key=(name_key, addr_key or latlon)
+        if key in seen:
+            retention["duplicates_removed"] += 1
+            continue
         seen.add(key); out.append(r)
         if len(out)>=max_results: break
+    retention["retained_prospects"] = len(out)
+    st.session_state.retention = retention
     st.session_state.timing["discovery_seconds"] = round(time.time()-t0,2)
     return out
 
@@ -397,6 +418,15 @@ if run:
 if st.session_state.prospects is not None:
     df=st.session_state.prospects.copy()
     st.subheader("Prospects")
+    total=len(df)
+    websites=int(df.get("website", pd.Series(dtype=str)).fillna("").astype(str).str.len().gt(0).sum()) if "website" in df else 0
+    emails=int(df.get("best_email", pd.Series(dtype=str)).fillna("").astype(str).str.len().gt(0).sum()) if "best_email" in df else 0
+    phones=int(df.get("best_phone", pd.Series(dtype=str)).fillna("").astype(str).str.len().gt(0).sum()) if "best_phone" in df else 0
+    m1,m2,m3,m4=st.columns(4)
+    m1.metric("Prospects", total)
+    m2.metric("Websites", f"{websites}/{total}")
+    m3.metric("Emails", f"{emails}/{total}")
+    m4.metric("Phones", f"{phones}/{total}")
     preferred=["organization_name","website","official_website_status","best_email","best_phone","visible_emails","website_phone","address","source","website_candidates","contact_pages_checked","enrichment_status"]
     show=[c for c in preferred if c in df.columns]
     st.dataframe(df[show], use_container_width=True, hide_index=True)
@@ -409,6 +439,9 @@ if st.session_state.prospects is not None:
         st.download_button("Download Excel", to_excel(df), file_name=fname+".xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     if show_diag:
         with st.expander("Diagnostics", expanded=False):
+            st.write("Retention diagnostics")
+            st.json(st.session_state.retention)
+            st.write("Timing")
             st.json(st.session_state.timing)
             st.text("\n".join(st.session_state.debug[-80:]))
 else:
