@@ -10,8 +10,8 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-APP_VERSION = "v28"
-USER_AGENT = "ProspectDiscoveryEngine/28 (+https://streamlit.app; validated official-site resolver)"
+APP_VERSION = "v30"
+USER_AGENT = "ProspectDiscoveryEngine/30 (+https://streamlit.app; official-site-validation-directory-separation)"
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -200,7 +200,7 @@ BAD_DOMAINS = [
     "schoolsdigest.co.za", "businesslist", "cybo.com", "brabys.com", "yellowpages", "yell.com",
     "tripadvisor", "booking.com", "property24", "gumtree", "indeed.com", "glassdoor",
 ]
-DIRECTORY_HINTS = ["schoolguide", "saschools", "snupit", "brabys", "cybo", "businesslist", "directory", "yellowpages"]
+DIRECTORY_HINTS = ["schoolguide", "saschools", "snupit", "brabys", "cybo", "businesslist", "directory", "yellowpages", "primaryschool", "kenyaprimaryschools", "schoolsinkenya", "educationnews", "schoolandcollegelistings", "waze", "foursquare", "yelp", "tripadvisor"]
 # Country-aware domain handling
 #
 # v29 avoids hardcoding a few African countries only. It now uses a two-layer
@@ -859,11 +859,12 @@ def resolve_website_for_row(row, location_hint, search_level):
     # v28: accept only validated official sites as the primary website.
     # Plausible but unvalidated sites are preserved in website_candidates instead of
     # being exported as if they were official.
-    if top.get("official_ok") and top["score"] >= 55:
+    # Accept only sites that validate as official. Directory pages stay in candidates.
+    if top.get("official_ok") and top["score"] >= 55 and not any(h in get_domain(top["url"]) for h in DIRECTORY_HINTS):
         return top["url"], top["method"], candidates_str, "high" if top["score"] >= 78 else "medium"
-    if local_domain_score(top["url"], country) > 0 and top["score"] >= 70:
+    if local_domain_score(top["url"], country) > 0 and top["score"] >= 70 and not any(h in get_domain(top["url"]) for h in DIRECTORY_HINTS):
         return top["url"], top["method"], candidates_str, "medium"
-    return "", "not_found", candidates_str, "none"
+    return "", "directory_or_unverified_candidates", candidates_str, "none"
 
 # ---------------- Discovery ----------------
 
@@ -1060,6 +1061,12 @@ def resolve_websites(rows, location_hint, search_level, workers, progress):
                 rows[i]["website_source"] = method
                 rows[i]["website_candidates"] = cands
                 rows[i]["website_confidence"] = confidence
+                if rows[i].get("website"):
+                    rows[i]["official_website_status"] = "verified official" if confidence == "high" else "likely official"
+                elif cands:
+                    rows[i]["official_website_status"] = "not found - candidates retained"
+                else:
+                    rows[i]["official_website_status"] = "not found"
             except Exception as e:
                 pass
             done += 1
@@ -1278,7 +1285,7 @@ if run:
 if st.session_state.prospect_rows:
     df = pd.DataFrame(st.session_state.prospect_rows)
     show_cols = [c for c in [
-        "prospect_name", "sector", "city", "country", "website", "website_confidence", "website_source", "best_email", "best_phone",
+        "prospect_name", "sector", "city", "country", "website", "official_website_status", "website_confidence", "website_source", "best_email", "best_phone",
         "enrichment_status", "email_source", "phone_source", "website_candidates", "source_pages"
     ] if c in df.columns]
     st.subheader("Prospects")
