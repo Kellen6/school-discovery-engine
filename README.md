@@ -1,13 +1,16 @@
-# Prospect Discovery Engine v40
+# Prospect Discovery Engine v40.3
 
-Streamlit app for discovering prospects by sector/location, resolving official websites, and scraping contact details.
+Streamlit app for prospect discovery and contact enrichment.
 
-## v40 focus
-- Preserves school-optimized discovery and custom search modes
-- Retains prospects even when website identification fails
-- Stricter website validation to avoid acronym/generic false positives
-- Downgrades suspicious domains instead of marking them high confidence
-- Extracts phones/emails from home/contact/admissions/staff pages, `mailto:`, `tel:`, and schema text
+## Run locally
 
-## Streamlit Cloud
-Upload `app.py`, `requirements.txt`, and `README.md` to the root of your GitHub repo and deploy `app.py`.
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## v40.3 fixes
+- Adds Photon candidate-discovery fallback when Nominatim search is blocked.
+- Adds Overpass POST/GET fallback and clearer provider diagnostics.
+- Geocoding can recover from Nominatim 403 via Photon.
+- Website validation does not remove prospects.

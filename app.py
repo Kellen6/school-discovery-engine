@@ -8,7 +8,7 @@ import phonenumbers
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-UA = "ProspectDiscoveryEngine/40.1 (educational prospect research; contact: user@example.com)"
+UA = "ProspectDiscoveryEngine/40.3 (educational prospect research; contact: user@example.com)"
 REQ_TIMEOUT = 10
 
 SUSPICIOUS_GENERIC_DOMAINS = {
@@ -203,11 +203,22 @@ out center tags {min(limit*3,300)};
     endpoints=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter","https://overpass.osm.ch/api/interpreter"]
     for ep in endpoints:
         try:
-            r=requests.post(ep, data={"data":query}, headers={"User-Agent":UA}, timeout=30)
+            t0=time.time()
+            r=requests.post(ep, data={"data":query.encode("utf-8")}, headers={"User-Agent":UA,"Accept":"application/json","Content-Type":"application/x-www-form-urlencoded"}, timeout=30)
             log(f"Overpass POST {ep}: HTTP {r.status_code}")
+            stage_record("candidate_provider","attempted",provider="overpass_post",endpoint=ep,http_status=r.status_code,elapsed_seconds=round(time.time()-t0,2))
+            if not r.ok and r.status_code in (400,403,406,429):
+                try:
+                    t1=time.time()
+                    r=requests.get(ep, params={"data":query}, headers={"User-Agent":UA,"Accept":"application/json"}, timeout=30)
+                    log(f"Overpass GET {ep}: HTTP {r.status_code}")
+                    stage_record("candidate_provider","attempted",provider="overpass_get",endpoint=ep,http_status=r.status_code,elapsed_seconds=round(time.time()-t1,2))
+                except Exception as ge:
+                    log(f"Overpass GET error {ep}: {type(ge).__name__}: {ge}")
             if r.ok:
                 elems=r.json().get("elements",[])
                 log(f"Overpass {ep}: {len(elems)} candidates")
+                stage_record("candidate_provider","success",provider="overpass",endpoint=ep,count=len(elems))
                 rows=[]
                 for e in elems:
                     tags=e.get("tags",{})
@@ -231,8 +242,10 @@ out center tags {min(limit*3,300)};
 def nominatim_search(term,location,limit):
     url=f"https://nominatim.openstreetmap.org/search?q={quote_plus(term+' in '+location)}&format=jsonv2&limit={limit}&addressdetails=1&extratags=1"
     try:
-        r=requests.get(url, headers={"User-Agent":UA}, timeout=20)
+        t0=time.time()
+        r=requests.get(url, headers={"User-Agent":UA,"Accept":"application/json"}, timeout=20)
         log(f"Nominatim '{term} in {location}': HTTP {r.status_code}")
+        stage_record("candidate_provider","attempted",provider="nominatim_search",query=term,http_status=r.status_code,elapsed_seconds=round(time.time()-t0,2))
         out=[]
         if r.ok:
             for d in r.json():
@@ -243,6 +256,33 @@ def nominatim_search(term,location,limit):
         return out
     except Exception as e:
         log(f"Nominatim error {term}: {e}")
+        stage_record("candidate_provider","failed",provider="nominatim_search",query=term,error=f"{type(e).__name__}: {e}")
+        return []
+
+def photon_search(term, location, limit):
+    # Fallback place/candidate discovery when Nominatim search is blocked.
+    # Photon does not return rich website metadata, but it can return names/coordinates/addresses.
+    url=f"https://photon.komoot.io/api/?q={quote_plus(term+' in '+location)}&limit={int(limit)}"
+    try:
+        t0=time.time()
+        r=requests.get(url, headers={"User-Agent":UA,"Accept":"application/json"}, timeout=20)
+        log(f"Photon search '{term} in {location}': HTTP {r.status_code}")
+        stage_record("candidate_provider","attempted",provider="photon_search",query=term,http_status=r.status_code,elapsed_seconds=round(time.time()-t0,2))
+        out=[]
+        if r.ok:
+            feats=(r.json() or {}).get("features") or []
+            for f in feats:
+                props=f.get("properties") or {}
+                coords=(f.get("geometry") or {}).get("coordinates") or [None,None]
+                lon,lat=(coords+[None,None])[:2] if isinstance(coords,list) else (None,None)
+                name=props.get("name") or props.get("street") or ""
+                if not name: continue
+                parts=[props.get(k) for k in ["housenumber","street","district","city","county","state","country"] if props.get(k)]
+                out.append({"prospect_name":name,"address":", ".join(parts),"city":props.get("city") or props.get("county") or "","country":props.get("country") or infer_country_from_location(location),"lat":lat,"lon":lon,"website":"","osm_phone":"","source":"Photon"})
+        return out
+    except Exception as e:
+        log(f"Photon search error {term}: {type(e).__name__}: {e}")
+        stage_record("candidate_provider","failed",provider="photon_search",query=term,error=f"{type(e).__name__}: {e}")
         return []
 
 def is_false_positive(name, sector):
@@ -283,16 +323,22 @@ def discover(sector, custom_term, location, radius, limit, manual_lat=None, manu
         rows.extend(op)
 
     # Always supplement with text/place search. Do not stop early if Overpass returns fewer than cap.
+    # If Nominatim search is blocked (403) or returns no rows, Photon provides a non-Nominatim fallback.
     for t in terms:
         if len(rows) >= max(limit*2,80):
             break
-        rows.extend(nominatim_search(t, location, max(20, limit//2)))
+        before=len(rows)
+        ns=nominatim_search(t, location, max(20, limit//2))
+        rows.extend(ns)
+        if not ns:
+            rows.extend(photon_search(t, location, max(20, limit//2)))
         time.sleep(0.15)
 
     # Emergency broad fallback if upstream APIs behave oddly.
     if not rows and sector == "Schools (optimized)":
-        for t in ["school", "college", "academy"]:
-            rows.extend(nominatim_search(t, location, 50))
+        for t in ["school", "college", "academy", "primary school", "high school"]:
+            ns=nominatim_search(t, location, 50)
+            rows.extend(ns if ns else photon_search(t, location, 50))
             time.sleep(0.15)
 
     for r in rows:
@@ -321,6 +367,7 @@ def discover(sector, custom_term, location, radius, limit, manual_lat=None, manu
         rows=[r for r in kept or [x for x in rows if str(x.get("prospect_name","")).strip()]]
 
     retained=rows[:limit]
+    stage_record("candidate_discovery","success" if retained else "empty",overpass_candidates=overpass_count,raw_found=raw_total,retained=len(retained))
     return retained, {
         "geocoded":True,
         "overpass_candidates":overpass_count,
